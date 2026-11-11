@@ -3,6 +3,8 @@ import { SECTOR_LEVELS, generateSector, sectorOfPosition, sectorSize } from '../
 import { temperatureToRgb, type StarData } from '../universe/stars';
 
 const RADIUS = 3; // sectors loaded around the camera in each direction, per level
+/** Time per frame spent generating star sectors while flying, ms. */
+const SECTOR_BUDGET_MS = 2.5;
 
 // Shared by the points and by their motion streaks: the light of one star.
 const STAR_LIGHT = /* glsl */ `
@@ -168,16 +170,34 @@ export class Starfield {
 
   /** cam: galactic position in light years. */
   update(cam: { x: number; y: number; z: number }): void {
+    // Sectors the camera has just come near are generated a few at a time, within a budget per frame,
+    // and a level is rebuilt once all of its sectors are in: flying fast never stalls a frame on them.
+    // (The first fill, at start or after a jump into the unknown, is done at once.)
+    const deadline = performance.now() + SECTOR_BUDGET_MS;
     for (let l = 0; l < SECTOR_LEVELS; l++) {
       const lv = this.levels[l];
       const cx = sectorOfPosition(l, cam.x);
       const cy = sectorOfPosition(l, cam.y);
       const cz = sectorOfPosition(l, cam.z);
       const key = `${cx},${cy},${cz}`;
-      if (key !== lv.key) this.rebuild(l, cx, cy, cz, key);
+      if (key !== lv.key && (lv.key === '' || this.prepare(l, cx, cy, cz, deadline))) this.rebuild(l, cx, cy, cz, key);
       lv.points.position.set(lv.origin.x - cam.x, lv.origin.y - cam.y, lv.origin.z - cam.z);
       lv.streaks.position.copy(lv.points.position);
     }
+  }
+
+  /** Generates missing sectors around (cx, cy, cz) until the deadline; true once none are missing. */
+  private prepare(l: number, cx: number, cy: number, cz: number, deadline: number): boolean {
+    const lv = this.levels[l];
+    for (let x = cx - RADIUS; x <= cx + RADIUS; x++)
+      for (let y = cy - RADIUS; y <= cy + RADIUS; y++)
+        for (let z = cz - RADIUS; z <= cz + RADIUS; z++) {
+          const k = `${x},${y},${z}`;
+          if (lv.cache.has(k)) continue;
+          if (performance.now() > deadline) return false;
+          lv.cache.set(k, generateSector(l, x, y, z));
+        }
+    return true;
   }
 
   private rebuild(l: number, cx: number, cy: number, cz: number, key: string): void {
