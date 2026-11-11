@@ -18,11 +18,13 @@ void main() {
   float d = max(length(mv.xyz), 1e-4);
   float flux = aLum / (d * d);                      // solar luminosities per ly^2
   float mag = -2.5 * log(flux) / 2.302585 - 2.74;    // apparent magnitude
-  float intensity = clamp(pow(2.512, 0.5 * (4.6 - mag)), 0.0, 14.0);
+  // Brightness compressed less than before: a handful of bright stars, the rest faint pinpoints,
+  // as in long-exposure photographs (and Space Engine) rather than a field of equal sparks.
+  float intensity = clamp(pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0);
   // Pinpoints: only the few brightest stars grow beyond a couple of pixels.
-  float size = clamp(3.4 - mag * 0.45, 1.3, 5.0);
+  float size = clamp(2.7 - mag * 0.32, 1.0, 3.8);
   // About what the eye sees on a dark night; fainter stars fade out instead of flickering.
-  intensity *= smoothstep(9.5, 6.5, mag);
+  intensity *= smoothstep(8.8, 6.0, mag);
   // Scintillation: turbulence in the air focuses and spreads each star's light, many times a second.
   float ph = fract(aId * 0.6180339) * 6.2831853;
   float flicker = sin(uTime * (9.0 + 7.0 * fract(aId * 0.31)) + ph) * sin(uTime * (3.1 + 2.0 * fract(aId * 0.77)) + 2.0 * ph);
