@@ -198,7 +198,7 @@ function build(): GalaxyData[] {
     // A barred Magellanic spiral, as the wide-field photographs show it: a bright bar of star clouds off the
     // disc's centre, one arm wound out from its end (to the north-east, 30 Doradus on it), a faint patchy disc.
     // (Two arms, one of them all but gone: a single arm of the width real ones have.)
-    arms: 2, pitchK: 1.0, armContrast: 1, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.22 / 750, discLum: 0.6e-4,
+    arms: 2, pitchK: 1.0, armContrast: 2.2, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.22 / 750, discLum: 0.6e-4,
     discScale: 4500, height: 650, irregular: 0.62, blue: 0.95, dust: 0.5, barShift: [-800, 1200], tint: [0.84, 0.82, 1.0],
     flocculent: 0.25, spurs: 0, lopsided: 1,
     knots: [[3200, 2400, 1800, 3.2], [-5200, -2600, 900, 1.5], [1200, -3600, 700, 1.2]],
@@ -211,6 +211,18 @@ function build(): GalaxyData[] {
     const k = 0.88 * lightOf({ ...lmc, discLum: 0.6e-4, bulgeLum: 0.16 / 750 }) / lightOf(lmc);
     lmc.discLum *= k;
     lmc.bulgeLum *= k;
+    // 30 Doradus where the arm leaves the bar: the brightest point of the arm at its distance from the centre.
+    // (With the march's wobble of the arms' angle, gDiscPolar.)
+    const d30 = lmc.knots![0], r30 = Math.hypot(d30[0], d30[1]);
+    let best = -1, bestTh = 0;
+    for (let i = 0; i < 360; i++) {
+      const th = (i / 360) * Math.PI * 2;
+      const warped = th + 0.2 * Math.sin(r30 / (lmc.radius * 0.1) + lmc.seed) + 0.08 * Math.sin(3 * th + r30 / (lmc.radius * 0.048));
+      const a = armStrengthOf(lmc, r30 * Math.cos(th), r30 * Math.sin(th), warped);
+      if (a > best) { best = a; bestTh = th; }
+    }
+    d30[0] = r30 * Math.cos(bestTh);
+    d30[1] = r30 * Math.sin(bestTh);
   }
   add('Small Magellanic Cloud', 'irregular', fromSky(302.8, -44.3, 200e3), 9000, undefined, {
     // (NGC 346, its brightest star-forming region, and the Wing of young stars reaching towards the LMC.)
@@ -231,7 +243,10 @@ function build(): GalaxyData[] {
   add('Cigar Galaxy (M82)', 'irregular', fromSky(141.4, 40.6, 11.5e6), 18500);
   add('Centaurus A', 'lenticular', fromSky(309.5, 19.4, 12.4e6), 48000, undefined, { dust: 2.2 });
   add('Southern Pinwheel (M83)', 'barred spiral', fromSky(314.6, 32, 15e6), 27500, undefined, { arms: 2, armContrast: 1, blue: 1 });
-  add('Pinwheel (M101)', 'spiral', fromSky(102, 59.8, 21e6), 85000, undefined, { arms: 4, armContrast: 0.9, blue: 1, flocculent: 0.55, spurs: 0.6, lopsided: 0.7, pitchK: 1 / Math.tan(28 * DEG) });
+  add('Pinwheel (M101)', 'spiral', fromSky(102, 59.8, 21e6), 85000, undefined, {
+    // (Its bulge small and faint, its disc flocculent nearly to the centre.)
+    arms: 4, armContrast: 0.9, blue: 1, flocculent: 0.7, spurs: 0.6, lopsided: 0.7, pitchK: 1 / Math.tan(28 * DEG), bulgeScale: 2000, bulgeLum: 0.5e-4,
+  });
   add('Whirlpool (M51)', 'spiral', fromSky(104.9, 68.6, 28e6), 38000, undefined, { arms: 2, armContrast: 1, blue: 0.9, flocculent: 0.2, spurs: 0.8, lopsided: 0.35 });
   add('Sombrero (M104)', 'lenticular', fromSky(298.5, 51.1, 31e6), 25000, undefined, { dust: 1.8 });
   add('Phantom (M74)', 'spiral', fromSky(138.6, -45.7, 30e6), 47500, undefined, { arms: 2, armContrast: 1 });
@@ -343,10 +358,10 @@ export function armStrengthOf(g: GalaxyData, x: number, z: number, warped?: numb
   }
   const logr = Math.log(r / (g.radius * 0.077));
   const phase = g.arms * (theta - g.pitchK * logr);
-  const major = Math.pow(0.5 + 0.5 * Math.cos(phase), 3);
+  const major = Math.pow(0.5 + 0.5 * Math.cos(phase), 3 * Math.max(g.armContrast, 1));
   const minor = Math.pow(0.5 + 0.5 * Math.cos(2 * phase + 1.3), 4) * 0.35 * (1 - 0.8 * st.flocculent);
   const core = Math.min(1, Math.max(0, (r - g.radius * 0.048) / (g.radius * 0.096)));
-  let a = (1 - core) + core * (0.45 + (Math.min(1, major + minor) - 0.45) * g.armContrast);
+  let a = (1 - core) + core * (0.45 + (Math.min(1, major + minor) - 0.45) * Math.min(g.armContrast, 1));
   if (st.spurs > 0) {
     const side = Math.pow(0.5 + 0.5 * Math.cos(phase - 0.9), 3);
     const spur = Math.pow(0.5 + 0.5 * Math.cos(7 * (theta - Math.sign(g.pitchK) * 0.8 * logr) + g.seed), 4);
@@ -355,7 +370,8 @@ export function armStrengthOf(g: GalaxyData, x: number, z: number, warped?: numb
   if (st.flocculent > 0) {
     const patch = gnoise(x / (g.radius * 0.07) + g.seed + 41, g.seed + 41, z / (g.radius * 0.07) + g.seed + 41);
     const t = Math.min(1, Math.max(0, (patch - 0.25) / 0.45));
-    a += (a * t * t * (3 - 2 * t) * 1.5 - a) * st.flocculent * core;
+    const inner = Math.min(1, Math.max(0, (r - g.radius * 0.012) / (g.radius * 0.03)));
+    a += (a * t * t * (3 - 2 * t) * 1.5 - a) * st.flocculent * Math.max(core, inner);
   }
   if (st.lopsided > 0) a *= 1 + st.lopsided * 0.6 * Math.cos(theta + g.seed) * core;
   return Math.max(a, 0);

@@ -4,7 +4,7 @@ import { discEfficiency, iscoRadius } from './kerr';
 import type { StarData } from './stars';
 // (Positions on Sol's sky go through universe.ts's fromSky, the one galactic-coordinate convention.)
 import { GALAXIES, NAMED_GALAXIES, SOL, fromSky, type GalaxyData } from './universe';
-import { COSMOS } from './cosmos';
+import { COSMOS, findGalaxy } from './cosmos';
 
 // Black holes: Sagittarius A* at the centre of the Milky Way (the universe origin), a central one in
 // most other galaxies (catalogued masses for the named ones, generated from size for the rest), and
@@ -420,4 +420,18 @@ export function blackHoleOffset(bh: BlackHoleData, simTime: number, out: { x: nu
 /** The black hole at the centre of a galaxy, if it has one. */
 export function centralBlackHole(g: GalaxyData): BlackHoleData | null {
   return BLACK_HOLES.find((b) => b.galaxy === g && b.kind === 'supermassive') ?? null;
+}
+
+/**
+ * A black hole by name: those listed now, and the central hole of any generated galaxy by its catalogue number
+ * ("PGC 34630273004*", made now if it was not yet: the galaxy's number decodes to where it is), or null.
+ */
+export function findBlackHole(name: string): BlackHoleData | null {
+  const q = name.toLowerCase().trim();
+  const m = /^(pgc\s*\d+)\s*\*?$/.exec(q);
+  if (m) {
+    const g = findGalaxy(m[1]);
+    return g ? centralBlackHoleOf(g) : null;
+  }
+  return BLACK_HOLES.find((x) => x.name.toLowerCase() === q) ?? BLACK_HOLES.find((x) => x.name.toLowerCase().includes(q)) ?? null;
 }

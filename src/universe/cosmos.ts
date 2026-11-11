@@ -63,9 +63,18 @@ function luminosityAt(count: number, bright: number): number {
   return QX[a] + (QX[b] - QX[a]) * t;
 }
 
-/** The faintest galaxy (L*) worth drawing at a distance: fainter ones would not show. */
-export function faintestAt(d: number): number {
-  return Math.max(X_FLOOR, 0.5 * (d / D_STAR) ** 2);
+/**
+ * How faint (L*) the galaxies generated at a distance d go, as FAINT * (d / D_STAR)^2: deep enough that, with
+ * the intergalactic dark adaptation (galaxyCloud.ts), each comes into being fainter than shows and fades in
+ * (galaxyCloud's billboards fade them in over a factor of 3 above it).
+ */
+export const FAINT = 0.2;
+/** The most galaxies generated at once: past it the far cells are drawn shallower (Cosmos.bias). */
+const MAX_LOADED = 110000;
+
+/** The faintest galaxy (L*) worth drawing at a distance, with `bias` levels of four shallower: fainter ones would not show. */
+export function faintestAt(d: number, bias = 0): number {
+  return Math.max(X_FLOOR, FAINT * 4 ** bias * (d / D_STAR) ** 2);
 }
 // (Rounded down: a level draws at least every galaxy that would show.)
 const levelOf = (x: number): number => Math.max(0, Math.floor(Math.log(x / X_FLOOR) / Math.log(4) + 1e-9));
@@ -355,9 +364,17 @@ export class Cosmos {
     this.version++;
   }
 
+  /**
+   * Levels shallower than their distance calls for, beyond 30 Mly: raised while more than MAX_LOADED galaxies
+   * are generated, lowered again once well under it. (Memory stays bounded however crowded the view.)
+   */
+  bias = 0;
+
   /** Brings the cells around the camera to the detail their distance calls for, within a time budget (ms). */
   update(cam: { x: number; y: number; z: number }, budgetMs = 1.5): void {
     const t0 = performance.now();
+    if (this.byId.size > MAX_LOADED && this.bias < 3) { this.bias++; this.sweep = 0; }
+    else if (this.byId.size < MAX_LOADED * 0.4 && this.bias > 0) { this.bias--; this.sweep = 0; }
     const ci = cellOf(cam.x), cj = cellOf(cam.y), ck = cellOf(cam.z);
     if (ci !== this.centre[0] || cj !== this.centre[1] || ck !== this.centre[2]) {
       this.centre = [ci, cj, ck];
@@ -379,7 +396,7 @@ export class Cosmos {
       // Nearest point of the cell (a margin for galaxies spilling out of it).
       const near = (c: number, v: number): number => Math.max(c * CELL - v, 0, v - (c + 1) * CELL);
       const d = Math.max(Math.hypot(near(i, cam.x), near(j, cam.y), near(k, cam.z)) - 6e6, 0);
-      const want = levelOf(faintestAt(d));
+      const want = levelOf(faintestAt(d, d > 30e6 ? this.bias : 0));
       const have = this.loaded.get(cellCode(i, j, k))?.level;
       // (Deeper at once; shallower only once well past it, so a camera on the boundary does not flicker.)
       if (have === undefined || want < have || want > have + 1) this.set(i, j, k, want);
@@ -468,5 +485,5 @@ export const isGenerated = (g: GalaxyData): boolean => g.id >= NAMED_GALAXIES;
 
 /** Whether a galaxy is bright enough to show from a distance (ly): the faint ones drawn near the limit are not picked. */
 export function visibleAt(g: GalaxyData, d: number): boolean {
-  return g.id < NAMED_GALAXIES || lightOf(g) / MW_LIGHT >= faintestAt(d);
+  return g.id < NAMED_GALAXIES || lightOf(g) / MW_LIGHT >= 3 * faintestAt(d);
 }

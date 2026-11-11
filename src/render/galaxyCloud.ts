@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng';
 import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
-import { COSMOS, D_STAR } from '../universe/cosmos';
+import { COSMOS, D_STAR, FAINT } from '../universe/cosmos';
 import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { GalaxyHost } from './galaxyHost';
 import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
@@ -22,7 +22,9 @@ const NEAR_START = 6, NEAR_END = 8;
  */
 const INTERGALACTIC_ADAPT = 128;
 /** Billboard slots: the catalogue and every generated galaxy loaded around the camera. */
-const CAPACITY = 65536;
+const CAPACITY = 131072;
+/** Billboard slots written per frame at most, so that a burst of generated galaxies never makes a frame late. */
+const WRITES_PER_FRAME = 1200;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
 const BIG_PX = [650, 1000];
@@ -66,6 +68,7 @@ uniform float uBrightness;
 uniform vec2 uNearId;
 uniform vec2 uNearWeight;
 uniform float uHideClouds;
+uniform float uFaint;
 varying vec3 vEye;
 varying vec3 vRay;
 varying vec4 vA;
@@ -94,7 +97,8 @@ void main() {
 #endif
   // A generated galaxy comes into being where it is still too faint to show (cosmos.ts faintestAt): and fades in
   // from there as the camera comes nearer, so that none appears all at once.
-  weight *= smoothstep(1.0, 3.0, iLum / (0.5 * pow(d / ${D_STAR.toExponential()}, 2.0)));
+  // (uFaint: FAINT, times four for each level the far cells are drawn shallower, beyond 30 Mly.)
+  weight *= smoothstep(1.0, 3.0, iLum / ((d > 3e7 ? uFaint : ${FAINT.toFixed(3)}) * pow(d / ${D_STAR.toExponential()}, 2.0)));
   // The surveyed sky has the Magellanic Clouds in it already.
   if (iGlow.a == 1.0 || iGlow.a == 2.0) weight *= 1.0 - uHideClouds;
   // Too small to show any structure: a soft spot carrying the same light, never smaller than a pixel.
@@ -288,8 +292,19 @@ export class GalaxyCloud {
   }
 
   /** Takes in the galaxies generated and dropped since the last frame. */
+  /** Generated galaxies waiting for a slot (a few thousand are written per frame at most). */
+  private queued: GalaxyData[] = [];
+
   private stream(): void {
-    const { added, removed } = COSMOS.drain();
+    const drained = COSMOS.drain();
+    const removed = drained.removed;
+    if (drained.added.length) this.queued.push(...drained.added);
+    // (One gone before it was written: never written.)
+    if (removed.length && this.queued.length) {
+      const gone = new Set(removed.map((g) => g.id));
+      this.queued = this.queued.filter((g) => !gone.has(g.id));
+    }
+    const added = this.queued.splice(0, WRITES_PER_FRAME);
     for (const g of removed) {
       const slot = this.slotOf.get(g.id);
       if (slot === undefined) continue;
@@ -342,7 +357,7 @@ export class GalaxyCloud {
     this.field = make({
       uCam: { value: new THREE.Vector3() }, uPixelsPerRadian: { value: 1000 }, uFullPpr: { value: 1000 }, uBig: { value: new THREE.Vector2(...BIG_PX) },
       uBrightness: { value: 1 }, uNearId: { value: new THREE.Vector2(-1, -1) }, uNearWeight: { value: new THREE.Vector2() },
-      uHideClouds: { value: 0 }, uNoise: { value: galaxyNoise }, ...galaxyKnotUniforms,
+      uHideClouds: { value: 0 }, uFaint: { value: FAINT }, uNoise: { value: galaxyNoise }, ...galaxyKnotUniforms,
     }, {});
     // The same galaxies on the soft layer; only the resolution differs.
     this.fieldSoft = make({ ...this.field.uniforms, uPixelsPerRadian: { value: 1000 } }, { SOFT_PASS: 1 });
@@ -526,6 +541,7 @@ export class GalaxyCloud {
     f.uFullPpr.value = pixelsPerRadian;
     this.fieldSoft.uniforms.uPixelsPerRadian.value = pixelsPerRadian * softLayer.scale;
     f.uBrightness.value = gain;
+    f.uFaint.value = FAINT * 4 ** COSMOS.bias;
     for (let i = 0; i < NEAR_GALAXIES; i++) {
       f.uNearId.value.setComponent(i, near[i] ? this.slotOf.get(near[i].galaxy.id) ?? -1 : -1);
       this.nearWeight.setComponent(i, near[i] ? 1 - near[i].weight : 0);

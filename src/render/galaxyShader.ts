@@ -123,21 +123,22 @@ float gBulge(vec3 p, vec4 gA, vec4 gD, vec2 turn) {
 
 // 0..1: how strongly a point of the disc belongs to a spiral arm (matches armStrengthOf on the CPU).
 // (minorW: how much of the secondary arms between the main ones; a flocculent spiral has fewer, as rings of them read.)
+// (An arm contrast above 1 makes the arms narrower: as much contrast, in a crisper arc.)
 float gArm(float theta, float r, vec4 gA, vec4 gB, float minorW) {
   float phase = gB.x * (theta - gB.y * log(max(r, 1.0) / (gA.x * 0.077)));
-  float major = pow(0.5 + 0.5 * cos(phase), 3.0);
+  float major = pow(0.5 + 0.5 * cos(phase), 3.0 * max(gB.z, 1.0));
   float minor = pow(0.5 + 0.5 * cos(2.0 * phase + 1.3), 4.0) * 0.35 * minorW;
   float core = clamp((r - gA.x * 0.048) / (gA.x * 0.096), 0.0, 1.0);
-  return mix(1.0, mix(0.45, min(1.0, major + minor), gB.z), core);
+  return mix(1.0, mix(0.45, min(1.0, major + minor), min(gB.z, 1.0)), core);
 }
 
 // As gArm, for the dust: narrower lanes.
 float gLane(float theta, float r, vec4 gA, vec4 gB, float minorW) {
   float phase = gB.x * (theta - gB.y * log(max(r, 1.0) / (gA.x * 0.077)));
-  float major = pow(0.5 + 0.5 * cos(phase), 8.0);
+  float major = pow(0.5 + 0.5 * cos(phase), 8.0 * max(gB.z, 1.0));
   float minor = pow(0.5 + 0.5 * cos(2.0 * phase + 1.3), 10.0) * 0.5 * minorW;
   float core = clamp((r - gA.x * 0.048) / (gA.x * 0.096), 0.0, 1.0);
-  return mix(0.35, mix(0.3, min(1.0, major + minor), gB.z), core);
+  return mix(0.35, mix(0.3, min(1.0, major + minor), min(gB.z, 1.0)), core);
 }
 
 const float LANE_LEAD = 0.16;
@@ -156,9 +157,10 @@ float gArmStructure(float arm, vec3 p, float theta, float r, vec4 gA, vec4 gB, v
     a = max(a, mix(a, 0.35 + 0.65 * spur, gE.y * side * core));
   }
   if (gE.x > 0.0) {
-    // Flocculent: the arms in patches, a few kly long.
+    // Flocculent: the arms in patches, a few kly long; and the inner disc too, nearly to the bulge.
     float patchy = gnoise(vec3(p.x, 0.0, p.z) / (gA.x * 0.07) + gC.w + 41.0);
-    a = mix(a, a * smoothstep(0.25, 0.7, patchy) * 1.5, gE.x * core);
+    float inner = clamp((r - gA.x * 0.012) / (gA.x * 0.03), 0.0, 1.0);
+    a = mix(a, a * smoothstep(0.25, 0.7, patchy) * 1.5, gE.x * max(core, inner));
   }
   if (gE.z > 0.0) a *= 1.0 + gE.z * 0.6 * cos(theta + gC.w) * core;
   return a;
@@ -292,7 +294,8 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
       float stars = 0.85 * gColumn(ya, yb, gA.z * 0.7, ds) * 0.66 + 0.15 * gColumn(ya, yb, gA.z * 1.85, ds);
       float newborn = gColumn(ya, yb, gA.z * 0.25, ds) * 1.85;
       // (Seen whole from outside, star clouds are soft swellings of the arms, not a speckle all over the disc.)
-      float clump = max(1.0 + (0.4 + gD.y) * mix(2.2, 4.0, uSettle) * (0.5 - clouds), 0.2);
+      // (A flocculent disc is clumpier all over, its inner parts too.)
+      float clump = max(1.0 + (0.4 + gD.y + 0.6 * gE.x) * mix(2.2, 4.0, uSettle) * (0.5 - clouds), 0.2);
       float blue = 0.75 * gC.z * young;
       float lit = discLum * radial * (0.3 + 1.3 * arm) * clump * far;
       // (The old stars' colour: warm, but lavender-white in galaxies that are nearly all young, the Magellanic Clouds.)

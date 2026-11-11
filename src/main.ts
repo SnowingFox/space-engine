@@ -17,7 +17,7 @@ import { BlackHoles } from './render/blackHole';
 import { blackHoleTarget, nebulaTarget } from './game/target';
 import { NEBULAE, nebulaAt, skyDirection, type NebulaData } from './universe/nebulae';
 import type { LabelSource } from './game/labels';
-import { BLACK_HOLES } from './universe/blackHoles';
+import { BLACK_HOLES, findBlackHole } from './universe/blackHoles';
 import { initProbe } from './render/probe';
 import { Starfield } from './render/starfield';
 import { SystemView, type BodyState } from './render/systemView';
@@ -333,12 +333,18 @@ function searchObjects(query: string): Target[] {
   const galaxies = GALAXIES.map((g) => ({ g, r: rank(g.name) })).filter((h) => h.r >= 0 && (q !== '' || h.g.id < NAMED_GALAXIES));
   // (And, on a match, the generated ones around the camera, by their catalogue number.)
   if (q !== '') COSMOS.forEach((g) => { const r = rank(g.name); if (r >= 0 && galaxies.length < 200) galaxies.push({ g, r }); });
+  // (A generated galaxy by its number, generated now if it was not yet.)
+  const byNumber = /^pgc\s*\d+$/.test(q.trim()) ? findGalaxy(q) : null;
+  if (byNumber && !galaxies.some((h) => h.g === byNumber)) galaxies.push({ g: byNumber, r: 0 });
   galaxies.sort((a, b) => a.r - b.r || a.g.id - b.g.id);
   for (const h of galaxies.slice(0, q === '' ? NAMED_GALAXIES : 20)) out.push(galaxyTarget(h.g));
   // Black holes: the real ones are listed before anything is typed, the generated ones (named after their galaxy) on a match.
   const bhs = BLACK_HOLES.map((b) => ({ b, r: rank(b.name) })).filter((h) => h.r >= 0 && (q !== '' || !generatedHole(h.b)));
   bhs.sort((a, b) => a.r - b.r || a.b.id - b.b.id);
   for (const h of bhs.slice(0, 20)) out.push(blackHoleTarget(h.b));
+  // (A generated galaxy's hole by its number, listed or not.)
+  const pgc = /^pgc\s*\d+\s*\*?$/.test(q.trim()) ? findBlackHole(q) : null;
+  if (pgc && !bhs.some((h) => h.b === pgc)) out.push(blackHoleTarget(pgc));
 
   if (q !== '') {
     // The starfield has no public listing yet; read its streamed levels directly.
@@ -727,7 +733,7 @@ Object.assign(window, {
     getView: () => view,
     /** A black hole's target by (part of) its name, for go / select. */
     blackHole: (name: string) => {
-      const b = BLACK_HOLES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
+      const b = findBlackHole(name);
       return b ? blackHoleTarget(b) : null;
     },
     holes,
