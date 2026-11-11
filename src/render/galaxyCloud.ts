@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng';
-import { GALAXIES, armStrengthOf, densityOf, toGalaxy, type GalaxyData } from '../universe/universe';
+import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
 import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
 import { HomeSky } from './homeSky';
@@ -13,10 +13,22 @@ const NEAR_START = 6, NEAR_END = 8;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
 const BIG_PX = [650, 1000];
-// Inside a disc: half of what it was (the band was too bright next to the stars; see the report on calibration).
-const INSIDE_GAIN = 0.25, OUTSIDE_GAIN = 1.3;
-/** Brightness of the surveyed sky inside a disc. */
-const HOME_GAIN = 0.55;
+/**
+ * The glow of a galaxy in the starfield's own units, from its surface brightness. A star of magnitude m is
+ * drawn with 2.512^(0.7 (3.6 - m)) over a point of ~1.4 px (starfield.ts), all of 0.034 at m = 7, where the
+ * stars fade out and their unresolved light, the glow, takes over. A patch of sky of mu mag/arcsec^2 then
+ * gives each pixel (of 21,550 arcsec^2 at the reference view: 1144 px tall at ratio 1.42, 60 deg) the light
+ * of a star of mu - 10.83: 729 x 10^(-0.4 (mu - 7)). Calibrated on the Milky Way from Sol: the Cygnus star
+ * cloud at 21.3 mag/arcsec^2 (the brightest band, Sagittarius, comes out at ~20.2, the anticentre ~22.1),
+ * which is ~0.0014 per pixel at exposure 1: faint, as the real one is; the dark-adapted exposure in open space
+ * (pipeline.ts) brings it out. The same factor from inside and outside: a galaxy's surface brightness does
+ * not depend on where it is seen from (only how bright the view as a whole is, which the eye adapts to).
+ */
+// (Then raised 2.6 times, as if anchored on stars of magnitude ~8 rather than 7, so that the dark-adapted
+// band reads between the old, too bright one and the strictly anchored one, which was too dark to enjoy.)
+const INSIDE_GAIN = 0.0125 * 2.6, OUTSIDE_GAIN = INSIDE_GAIN;
+/** Brightness of the surveyed sky inside a disc, matched to the model in the Cygnus star cloud. */
+const HOME_GAIN = 0.0275 * 2.6;
 
 const FIELD_VERT = /* glsl */ `
 attribute vec3 iPos;
@@ -352,14 +364,7 @@ export class GalaxyCloud {
       out = THREE.MathUtils.smoothstep(Math.max(Math.abs(host.eye.y) - g.height, Math.hypot(host.eye.x, host.eye.z) - g.radius), 0, g.radius * 0.35);
     }
     gain *= THREE.MathUtils.lerp(INSIDE_GAIN, OUTSIDE_GAIN, out);
-    // And it adapts to where in the disc it is: towards the core the sky is many times brighter than
-    // half-way out (calibrated there, where the Sun is), and would be a white glare.
-    if (host && out < 1) {
-      const g = host.galaxy;
-      const local = (x: number, z: number): number => densityOf(g, x, 0, z, false) + 1e-6;
-      const ratio = local(host.eye.x, host.eye.z) / local(0.5 * g.radius, 0);
-      gain *= THREE.MathUtils.lerp(THREE.MathUtils.clamp(Math.pow(ratio, -0.9), 0.05, 1.5), 1, out);
-    }
+    // (Towards a galaxy's core the sky is many times brighter: the light meter turns the exposure down there.)
     const surveyed = this.home.update(host, pixelsPerRadian, this.survey ? HOME_GAIN : 0);
     // Inside a galaxy, in its disc, above it and in its outskirts, it is the sky map's: one march of one model,
     // so leaving the disc changes the perspective and nothing else. Only well outside, where the whole galaxy
@@ -376,7 +381,11 @@ export class GalaxyCloud {
       this.speed += ((host && v > host.galaxy.radius * 2 ? 0 : v) - this.speed) * Math.min(1, dtc * 3);
     }
     this.lastCam = { x: cam.x, y: cam.y, z: cam.z, t };
-    const tooFast = host ? THREE.MathUtils.smoothstep(this.speed, host.galaxy.radius * 0.0125, host.galaxy.radius * 0.05) : 0;
+    // (Not inside the disc: there the march on screen sees far less of the dust and arms than the map, and the
+    // galaxy would fade as the camera speeds up. Inside it, the map keeps up by marching ahead of the camera.)
+    const tooFast = host
+      ? THREE.MathUtils.smoothstep(this.speed, host.galaxy.radius * 0.0125, host.galaxy.radius * 0.05) * THREE.MathUtils.smoothstep(Math.abs(host.eye.y), 1.5 * host.galaxy.height, 4 * host.galaxy.height)
+      : 0;
     this.fast += (tooFast - this.fast) * Math.min(1, Math.max(dtc, 0) * 4);
     const direct = host
       ? Math.max(THREE.MathUtils.smoothstep(span(host), 1.5, 2.1), THREE.MathUtils.smoothstep(Math.abs(host.eye.y) / host.galaxy.radius, 0.25, 0.42), this.fast)

@@ -29,6 +29,16 @@ void main() {
   gl_Position = vec4(position.xy, 0.0, 1.0);
 }
 `;
+// The background enters the frame here: anything not finite in it (one NaN would be spread over the whole
+// frame by the bloom, as a flat white or coloured frame) is clamped away. (min/max rather than isnan,
+// which fast-math compilers may drop; Metal's fmin/fmax return the number when the other operand is NaN.)
+const BG_FRAG = /* glsl */ `
+uniform sampler2D tSoft;
+varying vec2 vUv;
+void main() {
+  gl_FragColor = max(min(texture2D(tSoft, vUv), vec4(6e4)), vec4(0.0));
+}
+`;
 const SOFT_FRAG = /* glsl */ `
 uniform sampler2D tSoft;
 varying vec2 vUv;
@@ -39,6 +49,10 @@ void main() {
 
 // Light meter: a thumbnail of the HDR frame with log2 luminance packed into 8 bits (2^-12 .. 2^8).
 const METER_W = 48, METER_H = 27;
+/** Mean light of the frame the dark-adapted eye brings up to (linear): a faint Milky Way about 25 / 255 grey. */
+const DARK_SKY = 0.033;
+/** How far the eye dark-adapts in open space or on a night side (the band at exposure 1 is ~0.0014). */
+export const DARK_ADAPTED = 16;
 const METER_FRAG = /* glsl */ `
 uniform sampler2D tScene;
 uniform vec2 uTexel;
@@ -79,6 +93,13 @@ export class Pipeline {
   autoExposure = true;
   /** How far adaptation may brighten the frame: above 1 only where there is a landscape to see in the dark. */
   maxExposure = 1;
+  /**
+   * A nebula around the camera: its light is too faint for the meter to read as a lit scene, and the mean of the
+   * frame it gives would leave it a dim haze. The dark adaptation goes at least this far (set by the nebulae; 1: none).
+   */
+  darkAdapt = 1;
+  /** How far adaptation may darken it: below 0.6 only for what is far brighter than any star's surface (an accretion disc). */
+  minExposure = 0.6;
   exposure = 1;
   /** How much of the sky's light is lost to a dazzling star in view, 0..1: eyes and cameras stop down for it. */
   skyDim = 0;
@@ -131,7 +152,7 @@ export class Pipeline {
     const tri = new THREE.BufferGeometry();
     tri.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
     this.bgQuad = new THREE.Mesh(tri, new THREE.ShaderMaterial({
-      vertexShader: BG_VERT, fragmentShader: SOFT_FRAG, uniforms: { tSoft: { value: this.bgTarget.texture } },
+      vertexShader: BG_VERT, fragmentShader: BG_FRAG, uniforms: { tSoft: { value: this.bgTarget.texture } },
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
     }));
     this.bgQuad.frustumCulled = false;
@@ -149,6 +170,8 @@ export class Pipeline {
     this.composer.readBuffer = this.composer.renderTarget1;
     this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.45, 0.6, 1.7);
     this.composer.addPass(this.bloom);
+    // After bloom: the shadows of black holes darkened again, so the glow of their discs does not fill them.
+    this.composer.addPass(this.lens.mask);
     this.composer.addPass(new OutputPass());
 
     const softQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
@@ -247,15 +270,25 @@ export class Pipeline {
         if (read !== this.meterRead) return;
         this.meterBusy = false;
         // Average the lit part of the frame in stops; black space and the faint glow of galaxies say nothing about how bright the scene is.
-        let sum = 0, lit = 0;
+        let sum = 0, lit = 0, all = 0, peak = -12;
         for (let i = 0; i < METER_W * METER_H; i++) {
           const stops = (this.meterPixels[i * 4] / 255) * 20 - 12;
           if (stops > -4.5) { sum += stops; lit++; }
+          all += Math.pow(2, stops);
+          peak = Math.max(peak, stops);
         }
         const coverage = lit / (METER_W * METER_H);
         this.daylight = lit > 0 ? THREE.MathUtils.smoothstep(coverage, 0.04, 0.3) * THREE.MathUtils.smoothstep(sum / lit, -3.2, -1.2) : 0;
-        const wanted = lit > 0 ? THREE.MathUtils.clamp(0.19 / Math.pow(2, sum / lit), 0.6, this.maxExposure) : 1;
-        this.exposureGoal = THREE.MathUtils.lerp(1, wanted, THREE.MathUtils.smoothstep(coverage, 0.03, 0.4));
+        // With nothing lit in view the eye dark-adapts, as far as maxExposure, until the faint light there is
+        // (the glow of the galaxy) reads as a dim sky: a subtle band of light, not a glare, in the core of a disc too.
+        // (Never so far that the frame as a whole, the Milky Way behind the nebula too, becomes a glare.)
+        const mean = all / (METER_W * METER_H);
+        const dark = Math.max(THREE.MathUtils.clamp(DARK_SKY / mean, 1, Math.max(this.maxExposure, 1)), Math.min(this.darkAdapt, Math.max(1, 0.03 / mean)));
+        const wanted = lit > 0 ? THREE.MathUtils.clamp(0.19 / Math.pow(2, sum / lit), this.minExposure, Math.max(this.maxExposure, this.darkAdapt)) : dark;
+        let goal = THREE.MathUtils.lerp(dark, wanted, THREE.MathUtils.smoothstep(coverage, 0.03, 0.4));
+        // A sun in view, however small, stops the eye down at once: the dark adaptation is gone.
+        goal = THREE.MathUtils.lerp(goal, Math.min(goal, 1), THREE.MathUtils.smoothstep(peak, 0, 5));
+        this.exposureGoal = goal;
       }, () => { this.meterBusy = false; });
     }
     this.exposure += (this.exposureGoal - this.exposure) * (1 - Math.exp(-dt / 0.7));

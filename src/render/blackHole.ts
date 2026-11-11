@@ -4,12 +4,32 @@ import type { LabelSource } from '../game/labels';
 import type { Obstacle, Player } from '../game/player';
 import { blackHoleTarget, targetPosition, type Target } from '../game/target';
 import { BLACK_HOLES, blackHoleOffset, type BlackHoleData } from '../universe/blackHoles';
+import { SHADOW_BINS, iscoRadius, shadowTable } from '../universe/kerr';
 import { temperatureToRgb } from '../universe/stars';
 import type { LensParams, LensPass } from './lensPass';
 
 // Per frame: which black holes are worth the lens pass (on screen and lensing by a pixel or more, or with a
 // disc or jet bigger than a few pixels), what it needs to draw them, where the camera may not go, and the
 // distant ones as points of light (an active nucleus far away is a star-like point, as quasars are).
+//
+// Brightness: a hole's accretion light is its visible luminosity seen as a disc: flux 2 |cos i| L / d^2
+// (isotropic-equivalent) through the starfield's magnitude law while it is a point. Once the radius that holds
+// half its light is resolved, the traced disc takes over with the same total light at the handover (matched
+// face-on), after which its surface brightness stays constant, as a surface's does at any distance. Within the
+// disc the intensity is the physics, uncompressed: Planck's law at 550 nm for the gas's temperature, Doppler
+// and gravitationally shifted, I = g^3 B(nu / g, T): beaming like g^3.5 for a cool disc, gentler (~g) for
+// one so hot that the visible is on its Rayleigh-Jeans tail.
+
+/** The starfield's point of light (starfield.ts): intensity at the centre and size (CSS px) for a magnitude. */
+function pointLight(mag: number): [number, number] {
+  const intensity = Math.min(Math.pow(2.512, 0.7 * (3.6 - mag)), 9) * (1 - THREE.MathUtils.smoothstep(mag, 6.0, 8.8));
+  return [intensity, THREE.MathUtils.clamp(2.7 - mag * 0.32, 1, 3.8)];
+}
+const magnitude = (lum: number, dLy: number): number => -2.5 * Math.log10(Math.max(lum, 1e-30) / (dLy * dLy)) - 2.74;
+/** The size on screen (px) of the radius holding half a disc's light, at which the traced disc takes over from the point. */
+const HANDOVER_PX = 2.75;
+/** The fastest the disc's gas is shown to turn at its inner edge: a turn in 12 s (Cygnus X-1's takes 4 ms). */
+const MAX_TURN = (2 * Math.PI) / 12;
 
 /** The camera is held this many Schwarzschild radii from the centre (twice the photon sphere: the innermost stable orbit). */
 export const KEEP_OUT = 3;
@@ -56,17 +76,23 @@ const off1 = { x: 0, y: 0, z: 0 };
 
 export class BlackHoles {
   /** Those with light of their own, drawn as points while too small to trace. */
-  private readonly lit = BLACK_HOLES.filter((b) => b.lumVis > 0 && !b.companion);
+  private readonly lit = BLACK_HOLES.filter((b) => b.lum > 0 && !b.companion);
   private readonly points: THREE.Points;
   private readonly pointMat: THREE.ShaderMaterial;
   private readonly params: LensParams[] = Array.from({ length: MAX_HOLES }, () => ({
-    cam: new THREE.Vector3(), axis: new THREE.Vector3(), reachCos: 1, disc: new THREE.Vector4(), opacity: 1, time: 0, step: 0,
+    cam: new THREE.Vector3(), axis: new THREE.Vector3(), reachCos: 1, shadowCos: 1, disc: new THREE.Vector4(), opacity: 1,
+    spin: new THREE.Vector3(), shadow: new Float32Array(SHADOW_BINS * 2), phase: 0, step: 0, corona: new THREE.Vector3(),
     jet: new THREE.Vector4(), knots: Array.from({ length: 8 }, () => new THREE.Vector2()), point: new THREE.Vector4(),
+    occluder: new THREE.Vector4(), shadowRect: new THREE.Vector4(),
   }));
+  /** The shadow table each slot holds, by hole and inclination, so it is rebuilt only when the view changes. */
+  private readonly shadowKey: string[] = [];
   /** Per hole this frame: camera distance (r_s) and how much of its point gives way to the traced disc. */
   private readonly ro = new Float64Array(BLACK_HOLES.length);
   private readonly pos = BLACK_HOLES.map(() => new THREE.Vector3());
   private readonly inPass = new Set<number>();
+  /** The lowest exposure the eye may adapt to now (pipeline.minExposure). */
+  minExposure = 0.6;
   /** The nearest hole, for the HUD's place readout. */
   near: NearHole | null = null;
 
@@ -82,7 +108,7 @@ export class BlackHoles {
       col.set([c[0] * (1 - j) + 0.62 * j, c[1] * (1 - j) + 0.74 * j, c[2] * (1 - j) + 1.0 * j], i * 3);
     });
     g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
-    g.setAttribute('aLum', new THREE.BufferAttribute(new Float32Array(this.lit.map((b) => b.lumVis)), 1));
+    g.setAttribute('aLum', new THREE.BufferAttribute(new Float32Array(this.lit.map((b) => b.lum)), 1));
     this.pointMat = new THREE.ShaderMaterial({
       vertexShader: POINT_VERT, fragmentShader: POINT_FRAG, uniforms: { uPixelRatio: { value: pixelRatio } },
       blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, transparent: true,
@@ -128,7 +154,12 @@ export class BlackHoles {
     return out;
   }
 
-  update(player: Player, simTime: number, simDt: number, fov: number, aspect: number, ppr: number, pixelRatio: number): void {
+  /**
+   * occluder: the star of the system loaded around the camera (km relative to the anchor, radius km), which may
+   * stand in front of a hole: drawn as it is, not lensed. width / height: the frame in device pixels.
+   */
+  update(player: Player, simTime: number, simDt: number, fov: number, aspect: number, ppr: number, pixelRatio: number,
+    occluder: { pos: THREE.Vector3; radius: number } | null, width: number, height: number): void {
     const gx = player.anchor.x + player.local.x / KM_PER_LY, gy = player.anchor.y + player.local.y / KM_PER_LY, gz = player.anchor.z + player.local.z / KM_PER_LY;
     const tanY = Math.tan(THREE.MathUtils.degToRad(fov) / 2);
     const halfDiag = Math.atan(tanY * Math.hypot(1, aspect));
@@ -157,7 +188,8 @@ export class BlackHoles {
       let onScreen = off < halfDiag + reach;
       if (!onScreen && jetPx >= 3) onScreen = this.jetInView(bh, rel, view, halfDiag);
       if (!onScreen) continue;
-      chosen.push({ bh, ro, reach, fade: THREE.MathUtils.smoothstep(discPx, 1.5, 4) });
+      const corePx = bh.disc ? (bh.disc.light.rHalf / ro) * ppr : 0;
+      chosen.push({ bh, ro, reach, fade: THREE.MathUtils.smoothstep(corePx, 1.5, 4) });
     }
     chosen.sort((a, b) => a.ro - b.ro);
     chosen.length = Math.min(chosen.length, MAX_HOLES);
@@ -167,18 +199,55 @@ export class BlackHoles {
     holes.length = 0;
     this.inPass.clear();
     let cube = false;
+    const qInv = new THREE.Quaternion().copy(player.quat).invert();
     for (const c of chosen) {
-      const p = this.params[holes.length];
+      const slot = holes.length;
+      const p = this.params[slot];
       const bh = c.bh;
-      p.cam.copy(this.pos[bh.id]).negate().divideScalar(bh.rs);
+      const rel = this.pos[bh.id];
+      p.cam.copy(rel).negate().divideScalar(bh.rs);
       p.axis.set(bh.axis[0], bh.axis[1], bh.axis[2]);
       p.reachCos = c.reach >= Math.PI ? -2 : Math.cos(c.reach);
-      p.opacity = bh.disc ? bh.disc.opacity * c.fade : 0;
-      if (bh.disc) p.disc.set(bh.disc.rIn, bh.disc.rOut, bh.disc.tMax, bh.disc.peak * c.fade);
-      else p.disc.set(3, 3, 0, 0);
-      // (Wrapped: only the pattern's phase matters, and a float cannot hold years in units of milliseconds.)
-      p.time = ((simTime * C_KM_S) / bh.rs) % 1e5;
-      p.step = Math.abs(simDt * C_KM_S) / bh.rs;
+      // Spin: the Kerr shadow's edge for this inclination (rebuilt when the view of the hole changes).
+      const a = Math.min(bh.spin ?? 0, 0.9999);
+      const cosI = p.cam.dot(p.axis) / p.cam.length();
+      const incl = Math.acos(Math.min(Math.abs(cosI), 1));
+      const key = `${bh.id}:${incl.toFixed(3)}`;
+      if (this.shadowKey[slot] !== key) { shadowTable(a, incl, p.shadow); this.shadowKey[slot] = key; }
+      p.spin.set(a, iscoRadius(a), Math.sin(incl));
+      let edge = 0;
+      for (let k = 0; k < SHADOW_BINS; k++) edge = Math.max(edge, p.shadow[k * 2]);
+      const shadowAngle = Math.min(Math.asin(Math.min((edge * Math.sqrt(1 - 1 / c.ro)) / c.ro, 1)) * 1.1 + 3 / ppr, Math.PI);
+      p.shadowCos = Math.cos(shadowAngle);
+      this.shadowRect(p.shadowRect, rel, qInv, shadowAngle, tanY, aspect, width, height);
+
+      // Light: the point it is from afar, the disc it becomes (see the note at the top).
+      const dLy = rel.length() / KM_PER_LY;
+      const cosInc = Math.max(Math.abs(cosI), 0.05);
+      const lumIso = bh.lum * 2 * cosInc;
+      if (bh.disc) {
+        const rHalf = bh.disc.light.rHalf;
+        const handLy = (((rHalf * ppr) / HANDOVER_PX) * bh.rs) / KM_PER_LY;
+        const [ih, sh] = pointLight(magnitude(lumIso, handLy));
+        // The point's light (its profile sums to ~0.157 size^2) spread over the disc's face, seen at this tilt, at
+        // the handover size. (A surface's brightness should not depend on the angle it is seen at, but the point's
+        // does not fall with cos i once the starfield's law saturates; within a factor of 2 the handover wins.)
+        const total = ih * 0.157 * (sh * pixelRatio) ** 2;
+        const peak = (total * (rHalf / HANDOVER_PX) ** 2) / (bh.disc.light.area * Math.max(cosInc, 0.5));
+        p.disc.set(2 * bh.disc.rIn, bh.disc.rOut, bh.disc.tMax, peak * c.fade);
+        p.opacity = bh.disc.opacity * c.fade;
+        p.corona.set(bh.disc.corona[0] * peak * c.fade, bh.disc.corona[1], bh.disc.corona[2]);
+        // The gas at the inner edge turns at Omega = c^3 / (GM) / (r^1.5 + a), shown no faster than MAX_TURN.
+        const omega = Math.min(C_KM_S / (bh.rs / 2) / (Math.pow(2 * bh.disc.rIn, 1.5) + a), MAX_TURN);
+        // (Wrapped: a float cannot hold the phase after years of turning.)
+        p.phase = (omega * simTime) % (2 * Math.PI * 1000);
+        p.step = omega * Math.abs(simDt);
+      } else {
+        p.disc.set(6, 6, 0, 0);
+        p.opacity = 0;
+        p.corona.set(0, 1, 1);
+        p.phase = p.step = 0;
+      }
       if (bh.jet) {
         p.jet.set(bh.jet.length, bh.jet.gamma, bh.jet.power, 1);
         for (let k = 0; k < 8; k++) p.knots[k].set(...(bh.jet.knots[k] ?? [0, 0]));
@@ -187,18 +256,25 @@ export class BlackHoles {
       const li = this.lit.indexOf(bh);
       p.point.set(0, 0, 0, 0);
       if (li >= 0 && c.fade < 1) {
-        const dLy = this.pos[bh.id].length() / KM_PER_LY;
-        const mag = -2.5 * Math.log10(bh.lumVis / (dLy * dLy)) - 2.74;
-        const intensity = Math.min(Math.pow(2.512, 0.7 * (3.6 - mag)), 9) * (1 - THREE.MathUtils.smoothstep(mag, 6.0, 8.8)) * (1 - c.fade);
+        const [intensity, size] = pointLight(magnitude(lumIso, dLy));
         const colour = this.points.geometry.getAttribute('aColor');
-        p.point.set(colour.getX(li) * intensity, colour.getY(li) * intensity, colour.getZ(li) * intensity, THREE.MathUtils.clamp(2.7 - mag * 0.32, 1, 3.8) * pixelRatio);
+        const k = intensity * (1 - c.fade);
+        p.point.set(colour.getX(li) * k, colour.getY(li) * k, colour.getZ(li) * k, size * pixelRatio);
       }
+      // The system's star, if it stands between the camera and the hole, is drawn in front of the lens.
+      if (occluder) {
+        v1.copy(occluder.pos).sub(player.local).divideScalar(bh.rs);
+        p.occluder.set(v1.x, v1.y, v1.z, occluder.radius / bh.rs);
+      } else p.occluder.set(0, 0, 0, 0);
       this.inPass.add(bh.id);
       holes.push(p);
       // Strongly bent rays leave the screen: the background then comes from a cube map around the camera.
       if (c.ro < 4 * ppr) cube = true;
     }
     this.lens.enabled = holes.length > 0;
+    // An accretion disc in view is far brighter than a star's surface: the eye may stop down for it.
+    this.minExposure = chosen.some((c) => c.bh.disc && c.fade > 0) ? 0.03 : 0.6;
+    if (!this.lens.enabled) this.lens.mask.enabled = false;
     this.lens.useCube = cube;
     this.lens.view.copy(player.quat);
     this.lens.tan.set(tanY * aspect, tanY);
@@ -213,15 +289,32 @@ export class BlackHoles {
     const lum = la.array as Float32Array;
     this.lit.forEach((b, i) => {
       const ro = this.ro[b.id];
-      const discPx = b.disc ? (b.disc.rOut / ro) * ppr : 0;
-      lum[i] = this.inPass.has(b.id) ? 0 : b.lumVis * (1 - THREE.MathUtils.smoothstep(discPx, 1.5, 4));
-      arr[i * 3] = b.x - gx;
-      arr[i * 3 + 1] = b.y - gy;
-      arr[i * 3 + 2] = b.z - gz;
+      const discPx = b.disc ? (b.disc.light.rHalf / ro) * ppr : 0;
+      const dx = b.x - gx, dy = b.y - gy, dz = b.z - gz;
+      const cosI = Math.max(Math.abs(dx * b.axis[0] + dy * b.axis[1] + dz * b.axis[2]) / Math.max(Math.hypot(dx, dy, dz), 1e-30), 0.05);
+      lum[i] = this.inPass.has(b.id) ? 0 : b.lum * 2 * cosI * (1 - THREE.MathUtils.smoothstep(discPx, 1.5, 4));
+      arr[i * 3] = dx;
+      arr[i * 3 + 1] = dy;
+      arr[i * 3 + 2] = dz;
     });
     pa.needsUpdate = true;
     la.needsUpdate = true;
     this.pointMat.uniforms.uPixelRatio.value = pixelRatio;
+  }
+
+  /** The shadow's rectangle on screen (device pixels, GL origin bottom left) for the mask pass; width 0 if off screen. */
+  private shadowRect(out: THREE.Vector4, rel: THREE.Vector3, qInv: THREE.Quaternion, angle: number, tanY: number, aspect: number, w: number, h: number): void {
+    const v = v1.copy(rel).applyQuaternion(qInv);
+    if (angle > 0.6) { out.set(0, 0, w, h); return; }
+    if (v.z >= 0) { out.set(0, 0, 0, 0); return; }
+    const nx = v.x / -v.z / (tanY * aspect), ny = v.y / -v.z / tanY;
+    // (Generous: perspective stretches it towards the edges.)
+    const r = (Math.tan(angle) / tanY) * (h / 2) * (1.3 + Math.hypot(nx, ny)) + 3;
+    const cx = (nx * 0.5 + 0.5) * w, cy = (ny * 0.5 + 0.5) * h;
+    const x0 = Math.max(Math.floor(cx - r), 0), y0 = Math.max(Math.floor(cy - r), 0);
+    const x1 = Math.min(Math.ceil(cx + r), w), y1 = Math.min(Math.ceil(cy + r), h);
+    if (x1 <= x0 || y1 <= y0) out.set(0, 0, 0, 0);
+    else out.set(x0, y0, x1 - x0, y1 - y0);
   }
 
   private jetInView(bh: BlackHoleData, rel: THREE.Vector3, view: THREE.Vector3, halfDiag: number): boolean {
@@ -254,7 +347,7 @@ export class BlackHoles {
     for (const bh of BLACK_HOLES) {
       const ro = this.ro[bh.id];
       const close = ro < 2e6;
-      if (!close && !(bh.lumVis > 0 && !bh.companion)) continue;
+      if (!close && !(bh.lum > 0 && !bh.companion)) continue;
       const d = close ? this.pos[bh.id] : v1.set(bh.x - gal.x, bh.y - gal.y, bh.z - gal.z);
       const ang = d.angleTo(dir);
       const reach = Math.max(0.01, close && bh.disc ? Math.min(bh.disc.rOut / ro, 0.3) : 0, close ? 12 / ro : 0);
@@ -264,7 +357,6 @@ export class BlackHoles {
   }
 
   private pointVisible(bh: BlackHoleData, dLy: number): boolean {
-    const mag = -2.5 * Math.log10(bh.lumVis / (dLy * dLy)) - 2.74;
-    return mag < 7;
+    return magnitude(bh.lum, dLy) < 7;
   }
 }

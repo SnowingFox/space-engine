@@ -1,5 +1,6 @@
 import { Rng } from '../core/rng';
 import { KM_PER_AU, SECONDS_PER_DAY } from '../core/units';
+import { discEfficiency, iscoRadius } from './kerr';
 import type { StarData } from './stars';
 // (Positions on Sol's sky go through universe.ts's fromSky, the one galactic-coordinate convention.)
 import { GALAXIES, NAMED_GALAXIES, SOL, fromSky, type GalaxyData } from './universe';
@@ -21,17 +22,25 @@ const L_EDD = 1.26e31;
 const L_SUN = 3.828e26;
 
 export interface DiscData {
-  /** Inner and outer radius, Schwarzschild radii (inner: the ISCO, or where a faint disc is truncated). */
+  /** Inner and outer radius, Schwarzschild radii (inner: the ISCO for the hole's spin, or where a faint disc is truncated). */
   rIn: number;
   rOut: number;
-  /** Accretion rate as a fraction of the Eddington rate. */
+  /** Accretion rate as a fraction of the Eddington rate (at 10% efficiency). */
   mdot: number;
   /** Peak effective temperature of the Shakura-Sunyaev profile, K. */
   tMax: number;
-  /** Surface brightness at the peak in the HDR frame (a star's photosphere is about 4). */
-  peak: number;
   /** How much of the light behind it the flow stops: a thin disc is opaque, a hot starved flow mostly transparent. */
   opacity: number;
+  /** The corona (or, for a starved hole, the hot flow itself): brightness relative to the disc's peak, scale radius (r_s), colour temperature (K). */
+  corona: [number, number, number];
+  /**
+   * Its visible light (at 550 nm) seen face-on, in units of the peak intensity: integrated over the face (r_s^2),
+   * and the radius inside which half of it comes (r_s). A disc as hot as an X-ray binary's is bright out to its
+   * edge in visible light (I ~ T ~ r^-3/4, the Rayleigh-Jeans side); a cool one only near the hole.
+   */
+  light: { area: number; rHalf: number };
+  /** Fraction of its light that is visible (it shines mostly in X-rays or ultraviolet when hot). */
+  visible: number;
 }
 
 export interface JetData {
@@ -51,7 +60,7 @@ export interface BlackHoleData {
   kind: 'stellar' | 'supermassive';
   /** Solar masses. */
   mass: number;
-  /** Dimensionless spin a* (null where unmeasured). The renderer's geodesics are Schwarzschild. */
+  /** Dimensionless spin a* (null where unmeasured: drawn as 0). The renderer approximates Kerr (lensPass.ts). */
   spin: number | null;
   /** Schwarzschild radius, km. */
   rs: number;
@@ -68,8 +77,8 @@ export interface BlackHoleData {
   /** Relative orbit around the companion: separation (km), period (s), phase at t = 0. */
   orbit: { a: number; period: number; phase: number } | null;
   galaxy: GalaxyData | null;
-  /** Visual luminosity of the accretion flow and jet, L☉ (what a distant point of light carries). */
-  lumVis: number;
+  /** Visible luminosity of the accretion flow and jet, L☉: what its point of light carries from afar. */
+  lum: number;
 }
 
 function norm(v: number[]): [number, number, number] {
@@ -88,13 +97,25 @@ function axisSeenFromSol(x: number, y: number, z: number, incl: number, pa: numb
   return norm([0, 1, 2].map((i) => u[i] * c + s * (e[i] * cp + n[i] * sp)));
 }
 
+/** Accretion rate in kg/s for a fraction of the Eddington rate (defined at 10% efficiency). */
+function accretionRate(mass: number, mdot: number): number {
+  return (mdot * L_EDD * mass) / (0.1 * C * C);
+}
+
 /** Peak temperature of a Shakura-Sunyaev disc (K): T^4 = 3GMMdot/(8 pi sigma r^3) (1 - sqrt(rIn/r)), maximal at r = 49/36 rIn. */
 function peakTemperature(mass: number, mdot: number, rIn: number): number {
-  const eta = 0.057;
-  const mDot = (mdot * L_EDD * mass) / (eta * C * C);
   const rInM = rIn * RS_PER_MSUN * mass * 1000;
-  const t4 = ((3 * G * mass * M_SUN * mDot) / (8 * Math.PI * SIGMA * rInM ** 3)) * (1 / 7) * (36 / 49) ** 3;
+  const t4 = ((3 * G * mass * M_SUN * accretionRate(mass, mdot)) / (8 * Math.PI * SIGMA * rInM ** 3)) * (1 / 7) * (36 / 49) ** 3;
   return Math.pow(t4, 0.25);
+}
+
+/** hc / (k lambda) at 550 nm, K: the visible band's frequency as a temperature. */
+export const X_V = 26160;
+
+/** Planck's law at 550 nm relative to a reference temperature: (e^(X/T0) - 1) / (e^(X/T) - 1). */
+function planckV(t: number, t0: number): number {
+  const em1 = (y: number): number => (y < 1e-4 ? y * (1 + y / 2) : Math.expm1(Math.min(y, 700)));
+  return em1(X_V / t0) / em1(X_V / t);
 }
 
 /** Fraction of a blackbody's light that falls between 400 and 700 nm. */
@@ -103,28 +124,55 @@ function visibleFraction(t: number): number {
   let sum = 0;
   for (let i = 0; i < 30; i++) {
     const lam = (400 + (i + 0.5) * 10) * 1e-9;
-    sum += (1 / lam ** 5 / (Math.exp(c2 / (lam * t)) - 1)) * 10e-9;
+    sum += (1 / lam ** 5 / Math.expm1(Math.min(c2 / (lam * t), 700))) * 10e-9;
   }
   const total = (SIGMA * t ** 4) / Math.PI / (2 * 6.62607e-34 * C * C);
   return Math.min(sum / total, 1);
 }
 
-function makeDisc(mass: number, mdot: number, rIn: number, rOut: number): DiscData {
-  const tMax = peakTemperature(mass, mdot, rIn);
-  // A brightness scale, not a photometric one: the peak grows with the fourth root of the temperature, so a
-  // ten-million-kelvin X-ray disc is dazzling next to a photosphere (about 4) without being 10^4 times over the
-  // frame's range, and its structure still shows once the eye has adapted to it.
-  const peak = Math.min(Math.max(4 * Math.pow(tMax / 5772, 0.25), 0.25), 9);
-  return { rIn, rOut, mdot, tMax, peak, opacity: mdot < 1e-3 ? 0.45 : 1 };
+/** The Shakura-Sunyaev temperature profile, 1 at its peak (r = 49/36 rIn). */
+export function discProfile(r: number, rIn: number): number {
+  const rp = (49 / 36) * rIn;
+  return Math.pow(r / rp, -0.75) * Math.pow(Math.max(1 - Math.sqrt(rIn / r), 0) / (1 - 6 / 7), 0.25);
 }
 
-function discLuminosity(bh: { mass: number; disc: DiscData | null }): number {
+/** Visible light over the face of a disc (see DiscData.light) and the visible fraction of all its light. */
+function discLight(rIn: number, rOut: number, tMax: number): { light: { area: number; rHalf: number }; visible: number } {
+  const n = 600;
+  const rs: number[] = [], cum: number[] = [];
+  let area = 0, bol = 0, vis = 0;
+  for (let i = 0; i < n; i++) {
+    const r0 = rIn * Math.pow(rOut / rIn, i / n), r1 = rIn * Math.pow(rOut / rIn, (i + 1) / n);
+    const r = Math.sqrt(r0 * r1), dA = Math.PI * (r1 * r1 - r0 * r0);
+    const t = tMax * discProfile(r, rIn);
+    area += t > 0 ? planckV(t, tMax) * dA : 0;
+    const t4 = (t / tMax) ** 4 * dA;
+    bol += t4;
+    vis += t4 * (t > 0 ? visibleFraction(t) : 0);
+    rs.push(r1);
+    cum.push(area);
+  }
+  const half = cum.findIndex((c) => c >= area / 2);
+  return { light: { area, rHalf: rs[Math.max(half, 0)] }, visible: bol > 0 ? vis / bol : 0 };
+}
+
+/** A disc from the ISCO for this spin (rIn null) or truncated at rIn (r_s), out to rOut (r_s). */
+function makeDisc(mass: number, spin: number | null, mdot: number, rIn: number | null, rOut: number): DiscData {
+  const inner = rIn ?? iscoRadius(spin ?? 0) / 2;
+  const tMax = peakTemperature(mass, mdot, inner);
+  const thin = mdot >= 1e-3;
+  // A thin disc's corona is a faint, hot (Comptonising) halo; a starved hole's light is all hot flow, a ring
+  // brightest at the photon ring as in the EHT's images, coloured as warm as the disc it is drawn with.
+  const corona: [number, number, number] = thin ? [0.06, 4, 60000] : [0.25, 3, Math.max(tMax * 0.7, 3000)];
+  return { rIn: inner, rOut, mdot, tMax, opacity: thin ? 1 : 0.1, corona, ...discLight(inner, rOut, tMax) };
+}
+
+function discLuminosity(bh: { mass: number; spin: number | null; disc: DiscData | null }): number {
   if (!bh.disc) return 0;
   // Below ~1% of Eddington the flow is radiatively inefficient: it keeps most of its heat and falls in with it.
-  const eta = 0.057 * Math.min(1, Math.sqrt(bh.disc.mdot / 0.01));
-  const lBol = eta * bh.disc.mdot * L_EDD * bh.mass / L_SUN;
-  // Most of a disc's light comes from a few times its inner radius, a little cooler than the peak.
-  return lBol * visibleFraction(bh.disc.tMax * 0.7);
+  const eta = discEfficiency(bh.spin ?? 0) * Math.pow(Math.min(1, bh.disc.mdot / 0.01), 0.4);
+  // (Its visible part: the starfield's law, which the point of light far away goes through, is a visual one.)
+  return ((eta * accretionRate(bh.mass, bh.disc.mdot) * C * C) / L_SUN) * bh.disc.visible;
 }
 
 export const BLACK_HOLES: BlackHoleData[] = [];
@@ -142,16 +190,18 @@ function companionStar(name: string, pos: [number, number, number], cls: string,
   return star;
 }
 
-function add(bh: Omit<BlackHoleData, 'id' | 'rs' | 'lumVis'>): BlackHoleData {
-  const full: BlackHoleData = { ...bh, id: BLACK_HOLES.length, rs: RS_PER_MSUN * bh.mass, lumVis: 0 };
-  full.lumVis = discLuminosity(full) + (bh.jet ? 0.01 * bh.mass * bh.jet.power : 0);
+function add(bh: Omit<BlackHoleData, 'id' | 'rs' | 'lum'>): BlackHoleData {
+  const full: BlackHoleData = { ...bh, id: BLACK_HOLES.length, rs: RS_PER_MSUN * bh.mass, lum: 0 };
+  full.lum = discLuminosity(full) + (bh.jet ? 0.01 * bh.mass * bh.jet.power : 0);
   BLACK_HOLES.push(full);
   return full;
 }
 
 interface BinarySpec {
   name: string; l: number; b: number; dist: number; mass: number; spin: number | null; incl: number; pa: number;
-  periodDays: number; aAu: number; state: string; disc: [number, number, number] | null;
+  periodDays: number; aAu: number; state: string;
+  /** Accretion rate (Eddington), inner radius (r_s; null: the ISCO), outer radius (r_s). */
+  disc: [number, number | null, number] | null;
   star: [string, string, StarData['kind'], number, number, number];
 }
 
@@ -162,7 +212,7 @@ function addBinary(s: BinarySpec): void {
   add({
     name: s.name, kind: 'stellar', mass: s.mass, spin: s.spin, x: pos[0], y: pos[1], z: pos[2],
     axis: axisSeenFromSol(pos[0], pos[1], pos[2], s.incl, s.pa),
-    disc: s.disc ? makeDisc(s.mass, s.disc[0], s.disc[1], s.disc[2]) : null, jet: null, state: s.state, companion,
+    disc: s.disc ? makeDisc(s.mass, s.spin, s.disc[0], s.disc[1], s.disc[2]) : null, jet: null, state: s.state, companion,
     orbit: { a: s.aAu * KM_PER_AU, period: s.periodDays * SECONDS_PER_DAY, phase: (s.l * 7.3) % (2 * Math.PI) },
     galaxy: GALAXIES[0],
   });
@@ -176,7 +226,7 @@ function build(): void {
   add({
     name: 'Sagittarius A*', kind: 'supermassive', mass: 4.15e6, spin: 0.9, x: mw.x, y: mw.y, z: mw.z,
     axis: axisSeenFromSol(mw.x, mw.y, mw.z, 40, 70),
-    disc: makeDisc(4.15e6, 1e-7, 3, 60), jet: null,
+    disc: makeDisc(4.15e6, 0.9, 1e-7, null, 60), jet: null,
     state: 'Hot, radiatively inefficient flow (~10⁻⁷ Eddington inflow)', companion: null, orbit: null, galaxy: mw,
   });
 
@@ -185,7 +235,7 @@ function build(): void {
   addBinary({
     name: 'Cygnus X-1', l: 71.33, b: 3.07, dist: 7240, mass: 21.2, spin: 0.9985, incl: 27.5, pa: 20,
     periodDays: 5.5998, aAu: 0.244, state: 'Persistent X-ray source: disc fed by its companion’s wind (~2% Eddington)',
-    disc: [0.02, 3, 800], star: ['HDE 226868', 'O9.7Iab', 'supergiant', 40.6, 22.3, 31000],
+    disc: [0.02, null, 70], star: ['HDE 226868', 'O9.7Iab', 'supergiant', 40.6, 22.3, 31000],
   });
   // V404 Cygni: 9 M☉, 2.39 kpc, i = 67 deg (Miller-Jones et al. 2009, Khargharia et al. 2010); K3 III donor. Quiescent between outbursts.
   addBinary({
@@ -250,9 +300,11 @@ function build(): void {
       state = 'Active nucleus with a relativistic jet';
     }
     const quasar = mdot > 0.01;
+    // M87*: ~0.9 from its jet power and the EHT ring (EHT 2019 V); the others unmeasured, generated ones drawn at random.
+    const spin = g.name === 'Virgo A (M87)' ? 0.9 : named ? null : Math.round(rng.range(0.2, 0.98) * 100) / 100;
     add({
-      name: named ? named[0] : `${g.name}*`, kind: 'supermassive', mass, spin: named ? null : Math.round(rng.range(0.2, 0.98) * 100) / 100,
-      x: g.x, y: g.y, z: g.z, axis, disc: makeDisc(mass, mdot, 3, quasar ? 600 : 80), jet, state, companion: null, orbit: null, galaxy: g,
+      name: named ? named[0] : `${g.name}*`, kind: 'supermassive', mass, spin,
+      x: g.x, y: g.y, z: g.z, axis, disc: makeDisc(mass, spin, mdot, null, quasar ? 600 : 80), jet, state, companion: null, orbit: null, galaxy: g,
     });
   }
 }

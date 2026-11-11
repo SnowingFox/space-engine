@@ -4,6 +4,7 @@ import { GM_EARTH, GM_SUN, orbitPosition, phaseName, simClock, type BodyData, ty
 import { temperatureToRgb, type StarData } from '../universe/stars';
 import { generateSystem } from '../universe/system';
 import type { BlackHoleData } from '../universe/blackHoles';
+import { iscoRadius } from '../universe/kerr';
 import type { NebulaData } from '../universe/nebulae';
 import { MILKY_WAY, SOL, type GalaxyKind } from '../universe/universe';
 import { KM_PER_LY } from '../core/units';
@@ -83,6 +84,7 @@ function blackHoleProperties(bh: BlackHoleData): [string, string][] {
     ['Schwarzschild radius', formatDistance(bh.rs)],
     ['Photon sphere', formatDistance(bh.rs * 1.5)],
     ['Spin (a*)', bh.spin === null ? 'Unmeasured' : num(bh.spin)],
+    ['Innermost stable orbit', `${formatDistance((iscoRadius(bh.spin ?? 0) / 2) * bh.rs)} (${num(iscoRadius(bh.spin ?? 0) / 2)} r_s)`],
     ['Accretion', bh.state],
   ];
   if (bh.disc) {

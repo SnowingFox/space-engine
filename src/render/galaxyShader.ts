@@ -264,7 +264,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // The dust: cloud complexes with clear gaps between them (through which the far glow shows, as it does
       // through the real ones), their insides and edges torn into wisps and filaments down to a few light
       // years, as far as the pixels and the march resolve them.
-      float dense = gDust(q, clamp(grain, 1.0, 5.0), mix(2.0, 1.2, smoothstep(1.5 * gA.z, 4.0 * gA.z, abs(ro.y))), 0.55, false, 3) * gDust(q * 4.1 + 11.0, grain * 0.25, mix(0.5, 1.3, uSettle), 0.8, true, 6);
+      float dense = gDust(q, clamp(grain, 1.0, 5.0), mix(1.8, 1.2, smoothstep(1.5 * gA.z, 4.0 * gA.z, abs(ro.y))), 0.55, false, 3) * gDust(q * 4.1 + 11.0, grain * 0.25, mix(0.5, 1.3, uSettle), 0.8, true, 6);
       // (A single pass on screen, the galaxy seen whole: the finest wisps would only be a speckle of dark dots.)
       // Cloud complexes billow out of the dust layer here and there: the same dust, spread higher.
       // (Samples further apart than the clouds would only turn them into streaks: there the layer is even.)
@@ -292,7 +292,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // And the nearest thousand or two light years hold fewer clouds than further on: they would span tens
       // of degrees and cover the sky out of the plane. (Seen from far off, nothing changes.)
       float tc = ta - 0.5 * ds;
-      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, tc) * mix(0.3, 1.0, smoothstep(gA.x * 0.01, gA.x * 0.035, tc));
+      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, tc) * mix(0.2, 1.0, smoothstep(gA.x * 0.01, gA.x * 0.04, tc));
       tau = gB.w * ring * exp(-(r - 0.5 * gA.x) / (1.4 * gA.y)) * (0.1 + 2.6 * lane) * (0.1 + 1.6 * dense) * gas / 2200.0;
       }
     }

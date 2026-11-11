@@ -262,8 +262,7 @@ export class Player {
       const side = sideVec.copy(offset).addScaledVector(normal, -offset.dot(normal));
       if (side.lengthSq() < 1e-6) side.set(1, 0, 0).addScaledVector(normal, -normal.x);
       side.normalize();
-      // Arrive a little above the plane of the disc, where its far side shows lensed over the shadow.
-      const pref = side.multiplyScalar(Math.cos(0.2)).addScaledVector(normal, Math.sin(0.2) * up).normalize();
+      const pref = side.multiplyScalar(Math.cos(0.4)).addScaledVector(normal, Math.sin(0.4) * up).normalize();
       const near = 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40);
       offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
     }
@@ -282,7 +281,14 @@ export class Player {
     const next = end + remaining * Math.exp(-rate * dt);
     this.local.copy(tp).addScaledVector(offset, next);
 
-    m1.lookAt(this.local, tp, v2.copy(UP).applyQuaternion(this.quat));
+    v2.copy(UP).applyQuaternion(this.quat);
+    // By a black hole, end up with its disc level across the view (its axis up on screen).
+    if (ap.target.kind === 'blackhole') {
+      const [nx, ny, nz] = ap.target.bh.axis;
+      const up = sideVec.set(nx, ny, nz).multiplyScalar(Math.sign(offset.dot(sideVec.set(nx, ny, nz))) || 1);
+      v2.lerp(up, 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40)).normalize();
+    }
+    m1.lookAt(this.local, tp, v2);
     q1.setFromRotationMatrix(m1);
     this.quat.slerp(q1, 1 - Math.exp(-dt * 3.5));
 

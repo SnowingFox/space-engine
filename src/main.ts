@@ -11,10 +11,10 @@ import { galaxyTarget, parkingDistance, sameTarget, targetName, targetPosition, 
 import { GALAXIES, NAMED_GALAXIES, nearestGalaxy, type GalaxyData } from './universe/universe';
 import { GalaxyCloud } from './render/galaxyCloud';
 import { Nebulae } from './render/nebulae';
-import { Pipeline } from './render/pipeline';
+import { DARK_ADAPTED, Pipeline } from './render/pipeline';
 import { BlackHoles } from './render/blackHole';
 import { blackHoleTarget, nebulaTarget } from './game/target';
-import { NEBULAE, nebulaAt, type NebulaData } from './universe/nebulae';
+import { NEBULAE, nebulaAt, skyDirection, type NebulaData } from './universe/nebulae';
 import type { LabelSource } from './game/labels';
 import { BLACK_HOLES } from './universe/blackHoles';
 import { initProbe } from './render/probe';
@@ -545,10 +545,15 @@ function frame(now: number): void {
   }
 
   pipeline.setView(player.quat, fov);
-  holes.update(player, simTime, simDt, fov, pipeline.camera.aspect, pipeline.pixelsPerRadian, pipeline.pixelRatio);
-  // Eyes adapt to the dark on a night side or at dusk; in open space the sky stays as dark as it is.
+  // (The loaded system's star sits at the anchor: if it stands in front of a hole it hides it, unlensed.)
+  holes.update(player, simTime, simDt, fov, pipeline.camera.aspect, pipeline.pixelsPerRadian, pipeline.pixelRatio,
+    view ? { pos: tmp2.set(0, 0, 0), radius: view.star.radiusKm } : null,
+    Math.floor(window.innerWidth * pipeline.pixelRatio), Math.floor(window.innerHeight * pipeline.pixelRatio));
+  pipeline.minExposure = holes.minExposure;
+  // Eyes adapt to the dark on a night side, at dusk and in open space: the light meter takes the exposure
+  // up as far as this when nothing bright is in view, and down at once for a sun or a lit world.
+  pipeline.maxExposure = DARK_ADAPTED;
   const low = nearBody as BodyState | null;
-  pipeline.maxExposure = low ? 1 + 3 * (1 - THREE.MathUtils.smoothstep(player.altitude / low.body.radius, 0.02, 0.3)) : 1;
 
   player.galactic(gal);
   cloud.update(gal, pipeline.pixelsPerRadian, 1);
@@ -729,6 +734,8 @@ Object.assign(window, {
         ?? NEBULAE.find((x) => [x.name, ...x.aliases].some((a) => a.toLowerCase().includes(q)));
       return n ? nebulaTarget(n) : null;
     },
+    /** Debug: the direction (universe axes) of galactic longitude / latitude on Sol's sky, degrees. */
+    skyDir: (l: number, b: number) => skyDirection(l, b),
     galaxy: (name: string) => {
       const g = GALAXIES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
       return g ? galaxyTarget(g) : null;

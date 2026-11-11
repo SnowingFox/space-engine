@@ -342,7 +342,7 @@ export class GalaxyVolume {
         const ahead = near.map((n) => {
           const v = this.velocity.get(n.galaxy.id) ?? [0, 0, 0];
           // (Never further ahead than a little of the galaxy: a guess, not a jump.)
-          const lead = Math.min(1.8 * this.fadeTime, (n.galaxy.radius * 0.01) / Math.max(Math.hypot(v[0], v[1], v[2]), 1e-9));
+          const lead = Math.min(1.8 * this.fadeTime, (n.galaxy.radius * 0.05) / Math.max(Math.hypot(v[0], v[1], v[2]), 1e-9));
           return { ...n, eye: { x: n.eye.x + v[0] * lead, y: n.eye.y + v[1] * lead, z: n.eye.z + v[2] * lead } };
         });
         this.job = { target, view: capture(ahead), steps: DRAFT.steps, face: 0, row: 0, pass: 0 };
