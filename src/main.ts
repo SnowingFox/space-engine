@@ -50,7 +50,7 @@ const player = new Player(sol);
 const bloomPass = (pipeline as unknown as { bloom?: { enabled: boolean } }).bloom ?? null;
 const PHOTO_KEY = 'se.milkyWayPhoto';
 const settings: Settings = {
-  labels: true, orbits: true, fov: 60, mouseSensitivity: 1, bloom: bloomPass ? bloomPass.enabled : null,
+  labels: false, orbits: true, fov: 60, mouseSensitivity: 1, bloom: bloomPass ? bloomPass.enabled : null,
   // Remembered, so comparing the photo with the model survives reloads.
   milkyWayPhoto: localStorage.getItem(PHOTO_KEY) === '1',
 };

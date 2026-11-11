@@ -170,7 +170,8 @@ await press('KeyO');
 check('O toggles orbits', (await ev('se.settings.orbits')) === false && (await ev('se.getView().showOrbits')) === false);
 await press('KeyO');
 await press('KeyL', true);
-check('Shift+L toggles labels, not time', (await ev('se.settings.labels')) === false && (await state()).timeRate === 1);
+// (Labels are off by default.)
+check('Shift+L toggles labels, not time', (await ev('se.settings.labels')) === true && (await state()).timeRate === 1);
 await press('KeyL', true);
 await press('Backquote');
 check('` hides the interface', await ev(`getComputedStyle(document.getElementById('hud')).display === 'none' && getComputedStyle(document.getElementById('labels')).display === 'none'`));
