@@ -33,6 +33,9 @@ export const ICON = {
   play: svg('<path d="M7.500 5.500 13.500 10l-6 4.500z" fill="currentColor"/>'),
   real: svg('<circle cx="10" cy="10" r="6.5"/><path d="M10 6.300V10l2.500 1.700"/>'),
   close: svg('<path d="M5.500 5.500l9 9M14.500 5.500l-9 9"/>'),
+  info: svg('<circle cx="10" cy="10" r="7"/><path d="M10 9v4.800"/><path d="M10 6.300v.1"/>'),
+  music: svg('<path d="M8 14.500V4.500l8-1.500v10"/><circle cx="6" cy="14.500" r="2"/><circle cx="14" cy="13" r="2"/>'),
+  hide: svg('<path d="M2.500 10s2.800-5 7.500-5 7.500 5 7.500 5-2.800 5-7.500 5-7.500-5-7.500-5z"/><circle cx="10" cy="10" r="2.200"/><path d="M3.500 16.500 16.500 3.500"/>'),
 };
 
 export type IconName = keyof typeof ICON;

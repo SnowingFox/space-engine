@@ -76,6 +76,9 @@ const hud = new Hud(document.getElementById('hud')!, document.getElementById('la
   select: (t) => select(t),
   go: (t) => go(t),
   land: (t) => land(t),
+  center: (t) => { select(t); player.aim = { target: t, hold: false }; },
+  track: (t) => { select(t); player.aim = { target: t, hold: true }; },
+  follow: (t) => { select(t); follow = t.kind === 'body' ? t : null; },
   home: () => home(),
   time: (cmd) => timeCommand(cmd),
   settingsChanged: () => applySettings(),
@@ -261,6 +264,11 @@ input.onClick = (x, y, double) => {
   if (double) go(t);
   else select(t);
 };
+input.onContext = (x, y) => {
+  const t = pickAt(x, y);
+  if (t) hud.contextMenu(t, x, y);
+  else hud.closeContext();
+};
 
 /** Search: the current system first, then the home system, then loaded stars by name. */
 function searchObjects(query: string): Target[] {
@@ -344,6 +352,8 @@ function handleKeys(): void {
         else timeCommand('real');
         break;
       case 'KeyO': hud.flip('orbits'); break;
+      case 'KeyI': hud.toggleInfo(); break;
+      case 'KeyM': hud.music.toggle(); break;
       case 'F1': hud.toggle('help'); break;
       case 'F2': hud.toggle('browser'); break;
       case 'F3': hud.toggle('search'); break;

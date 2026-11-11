@@ -1,10 +1,11 @@
-/* SpaceEngine-style HUD: sparse slate panels docked to the edges, one type scale (10 / 12 / 20 px), one accent. */
+/* SpaceEngine-style HUD: thin translucent panels docked to the edges, one type scale (10 / 11 / 12 / 16 px), one accent.
+   No backdrop blur: it would re-blur the whole canvas under every panel each frame. */
 :root {
   --fg: #cdd5e0;
   --dim: #8591a4;
   --accent: #9cc8ff;
-  --panel: rgba(10, 14, 20, 0.76);
-  --panel-solid: rgba(10, 14, 20, 0.9);
+  --panel: rgba(8, 12, 18, 0.58);
+  --panel-solid: rgba(9, 13, 19, 0.92);
   --line: rgba(150, 190, 255, 0.18);
   --hover: rgba(150, 190, 255, 0.1);
   --active: rgba(150, 190, 255, 0.2);
@@ -30,7 +31,7 @@ html, body {
 #view.dragging { cursor: grabbing; }
 #labels, #hud { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
 #hud { --dock: 0px; }
-#hud.open-browser { --dock: 194px; }
+#hud.open-browser { --dock: 162px; }
 body.ui-hidden #hud, body.ui-hidden #labels { display: none; }
 
 /* ---- Shared pieces ------------------------------------------------------ */
@@ -41,9 +42,7 @@ body.ui-hidden #hud, body.ui-hidden #labels { display: none; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 3px;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 .hidden { display: none; }
 
@@ -57,7 +56,7 @@ button {
   background: transparent;
   border: 1px solid var(--line);
   border-radius: 2px;
-  padding: 3px 10px;
+  padding: 2px 8px;
   cursor: pointer;
 }
 button:hover { background: var(--hover); color: #fff; }
@@ -87,37 +86,56 @@ kbd {
 
 .orb { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; }
 
-/* ---- Left edge: toolbar ------------------------------------------------- */
+/* ---- Right edge: toolbar ------------------------------------------------ */
 
 .toolbar {
-  position: absolute; left: var(--gap); top: var(--gap);
+  position: absolute; right: var(--gap); top: var(--gap);
   display: flex; flex-direction: column; gap: 2px;
-  pointer-events: auto; opacity: 0.5; transition: opacity 0.2s;
+  pointer-events: auto; opacity: 0.55; transition: opacity 0.2s;
 }
 .toolbar:hover { opacity: 1; }
+.toolbar .sep { height: 6px; }
 .tool {
-  position: relative; width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
+  position: relative; width: 28px; height: 28px; padding: 0; display: grid; place-items: center;
   background: var(--panel); color: var(--fg);
 }
-.tool.on { color: var(--accent); border-color: rgba(156, 200, 255, 0.45); }
-.tool .tip {
-  position: absolute; left: 38px; top: 50%; transform: translateY(-50%);
+.tool svg { width: 16px; height: 16px; }
+.tool.on, .tbtn.on, .info .more.on { color: var(--accent); border-color: rgba(156, 200, 255, 0.45); }
+
+/* Tooltips with the key: left of the right toolbar, above the time buttons. */
+.tip {
+  position: absolute; right: 36px; top: 50%; transform: translateY(-50%);
   background: var(--panel-solid); border: 1px solid var(--line); border-radius: 2px;
-  padding: 3px 8px; white-space: nowrap; color: var(--fg);
+  padding: 2px 8px; white-space: nowrap; color: var(--fg); font-size: 11px;
   opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 5;
 }
-.tool:hover .tip { opacity: 1; }
+.tool:hover .tip, .tbtn:hover .tip { opacity: 1; transition-delay: 0.25s; }
+.tbtn .tip { right: auto; left: 50%; top: auto; bottom: 28px; transform: translateX(-50%); }
+.tbtn:last-child .tip { left: auto; right: -2px; transform: none; }
 
 /* ---- Top-left: selected object ------------------------------------------ */
 
-.info { left: calc(var(--gap) + 40px); top: var(--gap); min-width: 268px; max-width: 340px; max-height: calc(100vh - var(--dock) - 136px); overflow-y: auto; }
-.info .name { font-size: 20px; line-height: 1.2; font-weight: 400; color: #fff; }
-.info .cls { color: var(--accent); margin: 1px 0 8px; }
-.info .actions { display: flex; gap: 6px; margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
+.info { left: var(--gap); top: var(--gap); min-width: 220px; max-width: 300px; max-height: 25vh; overflow-y: auto; }
+.info.full { max-height: calc(100vh - var(--dock) - 150px); }
+.info .name { font-size: 16px; line-height: 1.25; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.info .cls { color: var(--accent); font-size: 11px; margin: 0 0 5px; }
+.info .kv { font-size: 11px; column-gap: 12px; }
+.info .actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.info .actions button { font-size: 11px; padding: 1px 6px; }
+.info .actions kbd { margin-left: 4px; line-height: 12px; padding: 0 3px; }
+.info .actions .more { margin-left: auto; }
+
+/* ---- Right-click menu --------------------------------------------------- */
+
+.ctx { left: 0; top: 0; padding: 3px; min-width: 168px; background: var(--panel-solid); z-index: 10; }
+.ctx .hd { padding: 2px 8px 3px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.ctx .item { display: flex; width: 100%; align-items: center; justify-content: space-between; border: none; padding: 2px 8px; text-align: left; }
+.ctx .item kbd { margin-left: 16px; }
 
 /* ---- Bottom-left: movement ---------------------------------------------- */
 
-.move { left: var(--gap); bottom: calc(var(--gap) + var(--dock)); min-width: 252px; }
+.move { left: var(--gap); bottom: calc(var(--gap) + var(--dock)); min-width: 220px; font-size: 11px; }
+.move .kv { column-gap: 12px; }
 .move .mode { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); margin: -2px 0 5px; }
 .move .mode.auto { color: var(--accent); }
 .move .limit { color: var(--dim); font-size: 10px; margin-left: 8px; visibility: hidden; }
@@ -125,14 +143,20 @@ kbd {
 
 /* ---- Bottom-right: clock ------------------------------------------------ */
 
-.clock { right: var(--gap); bottom: calc(var(--gap) + var(--dock)); min-width: 206px; text-align: right; }
+.clock { right: var(--gap); bottom: calc(var(--gap) + var(--dock)); min-width: 190px; text-align: right; font-size: 11px; }
 .clock .date { font-variant-numeric: tabular-nums; white-space: pre; }
 .clock .rate { color: var(--dim); }
 .clock .rate.odd { color: var(--accent); }
-.timebar { display: flex; justify-content: flex-end; gap: 2px; margin-top: 7px; }
-.tbtn { width: 28px; height: 22px; padding: 0; display: grid; place-items: center; }
-.tbtn svg { width: 16px; height: 16px; }
-.tbtn.on { color: var(--accent); border-color: rgba(156, 200, 255, 0.45); }
+.timebar { display: flex; justify-content: flex-end; gap: 2px; margin-top: 5px; }
+.tbtn { position: relative; width: 26px; height: 20px; padding: 0; display: grid; place-items: center; }
+.tbtn .ic { display: grid; place-items: center; }
+.tbtn svg { width: 15px; height: 15px; }
+
+/* In flight with the mouse still, everything but the readouts fades away. */
+.toolbar, .info, .move, .clock { transition: opacity 0.6s; }
+#hud.idle .toolbar { opacity: 0; }
+#hud.idle .info, #hud.idle .clock { opacity: 0.35; }
+#hud.idle .move { opacity: 0.7; }
 
 /* ---- Bottom-centre: toast ----------------------------------------------- */
 
@@ -153,13 +177,14 @@ kbd {
 
 /* ---- Bottom dock: solar system browser ---------------------------------- */
 
-.browser { left: var(--gap); right: var(--gap); bottom: var(--gap); height: 182px; display: none; padding-bottom: 4px; }
+.browser { left: var(--gap); right: var(--gap); bottom: var(--gap); height: 150px; display: none; padding: 6px 10px 2px; }
+.browser .title { margin: 0 0 2px; }
 #hud.open-browser .browser { display: block; }
-.browser .strip { display: flex; align-items: flex-start; gap: 4px; height: 144px; overflow-x: auto; overflow-y: hidden; }
+.browser .strip { display: flex; align-items: flex-start; gap: 4px; height: 122px; overflow-x: auto; overflow-y: hidden; }
 .browser .col { display: flex; flex-direction: column; align-items: center; min-width: 76px; flex: none; }
-.browser .col.star { min-width: 84px; margin-right: 6px; border-right: 1px solid var(--line); height: 136px; padding-right: 8px; }
+.browser .col.star { min-width: 84px; margin-right: 6px; border-right: 1px solid var(--line); height: 116px; padding-right: 8px; }
 .browser .item { display: flex; flex-direction: column; align-items: center; padding: 0 6px 2px; border: 1px solid transparent; border-radius: 2px; cursor: pointer; }
-.browser .stage { position: relative; width: 100%; min-width: 56px; height: 46px; display: grid; place-items: center; }
+.browser .stage { position: relative; width: 100%; min-width: 56px; height: 40px; display: grid; place-items: center; }
 .browser .ring {
   position: absolute; left: 50%; top: 50%; border: 1.5px solid rgba(214, 196, 160, 0.75); border-radius: 50%;
   transform: translate(-50%, -50%) rotate(-16deg); clip-path: polygon(0 46%, 100% 46%, 100% 100%, 0 100%);
@@ -214,6 +239,13 @@ kbd {
 .form input[type='checkbox'] { accent-color: var(--accent); margin: 0; width: 13px; height: 13px; }
 .form .out { width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
 .form .hint { color: var(--dim); }
+.form .sect { grid-column: 1 / -1; margin-top: 6px; padding-bottom: 3px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); border-bottom: 1px solid var(--line); }
+.form .track .tn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #fff; }
+.form .track .tn.none { color: var(--dim); }
+.form .track { gap: 6px; }
+.form .note, .help .note { grid-column: 1 / -1; color: var(--dim); font-size: 11px; line-height: 1.45; margin: 0; }
+.help .note { margin-top: 12px; }
+code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; color: var(--fg); }
 
 /* Scenic spots: a grid of picture cards. It is wide, so the object panel steps aside while it is open. */
 .dialog.scenic { width: 900px; top: 9%; }
@@ -248,6 +280,7 @@ kbd {
 }
 .label.star { color: rgba(240, 226, 196, 0.9); }
 .label.moon { color: rgba(160, 172, 190, 0.75); }
+.label.blackhole { color: rgba(236, 200, 160, 0.9); }
 .label.sel { color: var(--accent); }
 .label .d { color: var(--dim); margin-left: 7px; }
 

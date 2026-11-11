@@ -178,6 +178,32 @@ await press('Backquote');
 await press('KeyH');
 check('H = go home', (await state()).mode === 'Go to: Earth' || (await state()).selected === 'Earth', (await state()).mode);
 
+// --- Object panel, context menu, music.
+await press('KeyZ');
+await ev('se.placeAt(se.earth); se.select(se.earth)');
+await sleep(300);
+const infoRows = () => ev(`document.querySelectorAll('#hud .info .kv .k').length`);
+const compact = await infoRows();
+check('the object panel is compact by default', compact <= 4 && (await ev(`document.querySelector('#hud .info').getBoundingClientRect().height < innerHeight * 0.25`)), `${compact} rows`);
+await press('KeyI');
+check('I shows the full property list', (await infoRows()) > 8);
+await press('KeyI');
+check('I again goes back to the summary', (await infoRows()) === compact);
+await page.mouse.click(720, 450, { button: 'right' });
+await sleep(150);
+check('right-click on an object opens its menu', await ev(`!document.querySelector('#hud .ctx').classList.contains('hidden') && document.querySelector('#hud .ctx .hd').textContent === 'Earth'`));
+await press('Escape');
+check('Esc closes the menu, keeps the selection', await ev(`document.querySelector('#hud .ctx').classList.contains('hidden')`) && (await state()).selected === 'Earth');
+await page.mouse.click(720, 450, { button: 'right' });
+await sleep(150);
+await page.click('#hud .ctx .item:nth-child(3)');
+check('menu Go to flies there', (await state()).mode.endsWith(': Earth'), (await state()).mode);
+await press('KeyZ');
+const musicOn = await ev('se.hud.music.on');
+await press('KeyM');
+check('M toggles music', (await ev('se.hud.music.on')) === !musicOn);
+await press('KeyM');
+
 // --- Scenic spots: the panel, exact and repeatable poses, free flight afterwards.
 await press('KeyZ');
 await press('F6');

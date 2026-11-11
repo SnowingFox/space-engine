@@ -26,6 +26,8 @@ export class Input {
   dragButton = -1;
   /** Fired for a left press-and-release without movement. */
   onClick: (x: number, y: number, double: boolean) => void = () => {};
+  /** Fired for a right press-and-release without movement. */
+  onContext: (x: number, y: number) => void = () => {};
   private downX = 0;
   private downY = 0;
   private moved = 0;
@@ -71,6 +73,8 @@ export class Input {
     el.addEventListener('pointerup', (e) => {
       if (e.button !== this.dragButton) return;
       this.dragButton = -1;
+      // A right press-and-release without movement is a context click; with movement it orbited.
+      if (e.button === 2 && this.moved < 5) this.onContext(this.downX, this.downY);
       if (e.button === 0 && this.moved < 5) {
         const now = performance.now();
         const double = now - this.lastClick < 350;

@@ -1,6 +1,7 @@
 import type { SystemData } from '../universe/bodies';
 import { describe, kindLabel, swatch } from './describe';
 import type { HudActions, PanelName, Settings } from './hud';
+import type { MusicPlayer } from './music';
 import type { ScenicSpot } from './scenic';
 import { sameTarget, targetName, type Target } from './target';
 import { ICON, el, escapeHtml } from './ui';
@@ -207,7 +208,7 @@ export class ScenicDialog {
 export class SettingsDialog {
   private readonly sync_: (() => void)[] = [];
 
-  constructor(root: HTMLElement, private readonly settings: Settings, changed: () => void) {
+  constructor(root: HTMLElement, private readonly settings: Settings, changed: () => void, private readonly music: MusicPlayer) {
     root.innerHTML = titleBar('Settings');
     const body = el('div', 'form', root);
 
@@ -243,11 +244,70 @@ export class SettingsDialog {
     check('Orbits', 'orbits', 'O');
     check('Bloom', 'bloom', 'Glow around bright objects');
     check('Milky Way photo', 'milkyWayPhoto', 'NASA sky survey instead of the model, inside the Milky Way');
+
+    // Music: a soundtrack the player brings, from a file on their disk.
+    el('div', 'sect', body, 'Music');
+    el('label', 'k', body, 'Track');
+    const trackRow = el('div', 'v track', body);
+    this.trackName = el('span', 'tn', trackRow);
+    const file = el('input', '', trackRow);
+    file.type = 'file';
+    file.accept = 'audio/*';
+    file.hidden = true;
+    const pick = el('button', '', trackRow, 'Choose…');
+    pick.title = 'Pick an audio file from your disk (or drop one on the window)';
+    pick.addEventListener('click', () => { file.click(); pick.blur(); });
+    file.addEventListener('change', () => {
+      const f = file.files?.[0];
+      if (f) void music.setFile(f);
+      file.value = '';
+    });
+    this.removeBtn = el('button', '', trackRow, 'Remove');
+    this.removeBtn.addEventListener('click', () => { void music.clearFile(); this.removeBtn.blur(); });
+
+    el('label', 'k', body, 'Play');
+    const playRow = el('div', 'v', body);
+    this.musicOn = el('input', '', playRow);
+    this.musicOn.type = 'checkbox';
+    el('span', 'hint', playRow, 'M · loops, quieter during jumps');
+    this.musicOn.addEventListener('change', () => { if (this.musicOn.checked !== music.on) music.toggle(); this.musicOn.blur(); });
+
+    el('label', 'k', body, 'Volume');
+    const volRow = el('div', 'v', body);
+    this.vol = el('input', '', volRow);
+    this.vol.type = 'range';
+    this.vol.min = '0';
+    this.vol.max = '1';
+    this.vol.step = '0.01';
+    this.volOut = el('span', 'out', volRow);
+    this.vol.addEventListener('input', () => { music.setVolume(Number(this.vol.value)); this.volOut.textContent = `${Math.round(music.volume * 100)}%`; });
+    this.vol.addEventListener('change', () => this.vol.blur());
+    el('div', 'note', body, 'Choose an audio file or drop one on the window; it is kept in this browser. '
+      + 'Or put your own soundtrack at <code>public/music/soundtrack.mp3</code> (not committed).');
     this.sync();
   }
 
+  private readonly trackName: HTMLElement;
+  private readonly removeBtn: HTMLButtonElement;
+  private readonly musicOn: HTMLInputElement;
+  private readonly vol: HTMLInputElement;
+  private readonly volOut: HTMLElement;
+
   sync(): void {
     for (const f of this.sync_) f();
+    this.syncMusic();
+  }
+
+  syncMusic(): void {
+    const m = this.music;
+    if (!this.trackName) return;
+    this.trackName.textContent = m.track ?? 'None';
+    this.trackName.title = m.track ? (m.source === 'default' ? 'public/music/soundtrack.mp3' : m.track) : '';
+    this.trackName.classList.toggle('none', !m.track);
+    this.removeBtn.hidden = m.source !== 'file';
+    this.musicOn.checked = m.on;
+    this.vol.value = String(m.volume);
+    this.volOut.textContent = `${Math.round(m.volume * 100)}%`;
   }
 }
 
@@ -304,6 +364,7 @@ export const HELP_HTML = `${titleBar('Controls')}
     ${section('Navigation', [
       ['Click', 'Select object'],
       ['Double-click', 'Select and go to'],
+      ['Right-click', 'Object menu'],
       ['G', 'Go to selected object'],
       ['G G', 'Go to, then land'],
       ['Shift+G', 'Land on selected object'],
@@ -319,10 +380,15 @@ export const HELP_HTML = `${titleBar('Controls')}
       ['F3', 'Find object'],
       ['F4', 'Settings'],
       ['F6', 'Scenic spots'],
+      ['I', 'Full object info'],
       ['Shift+L', 'Labels'],
       ['O', 'Orbits'],
-      ['\`', 'Hide / show interface'],
+      ['M', 'Music on / off'],
+      ['\` / F10', 'Hide / show interface'],
+      ['Home', 'Reset field of view'],
     ])}
   </div>
 </div>
+<p class="note">Music: choose an audio file in Settings (F4) or drop one on the window, or put your own soundtrack at
+  <code>public/music/soundtrack.mp3</code> (that folder is not committed).</p>
 ${CREDITS_HTML}`;
