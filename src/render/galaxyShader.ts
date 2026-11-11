@@ -23,7 +23,7 @@ function makeNoise(): THREE.Data3DTexture {
 /** Bind as the uniform uNoise of every material that includes GALAXY_GLSL. */
 export const galaxyNoise = makeNoise();
 
-const KNOTS = 8, SHIFTS = 2;
+const KNOTS = 8, SHIFTS = 3;
 /**
  * Spread into the uniforms of every material that includes GALAXY_GLSL: the galaxies' giant star-forming
  * regions and off-centre bars, each tagged with the seed of its galaxy.
@@ -34,8 +34,9 @@ export const galaxyKnotUniforms: Record<string, THREE.IUniform> = (() => {
   return {
     uKnot: { value: Array.from({ length: KNOTS }, (_, i) => new THREE.Vector4(...(knots[i]?.k ?? [0, 0, 1, 0]))) },
     uKnotSeed: { value: Array.from({ length: KNOTS }, (_, i) => knots[i]?.seed ?? -1e9) },
-    uShift: { value: Array.from({ length: SHIFTS }, (_, i) => new THREE.Vector2(...(shifts[i]?.barShift ?? [0, 0]))) },
+    uShift: { value: Array.from({ length: SHIFTS }, (_, i) => new THREE.Vector3(...(shifts[i]?.barShift ?? [0, 0]), shifts[i]?.barAngle ?? 0)) },
     uShiftSeed: { value: Array.from({ length: SHIFTS }, (_, i) => shifts[i]?.seed ?? -1e9) },
+    uTint: { value: Array.from({ length: SHIFTS }, (_, i) => new THREE.Vector3(...(shifts[i]?.tint ?? [0, 0, 0]))) },
   };
 })();
 
@@ -54,8 +55,9 @@ uniform highp sampler3D uNoise;
 // Giant star-forming regions (x, z, radius, brightness in the galaxy's frame), each of the galaxy with that seed.
 uniform vec4 uKnot[${KNOTS}];
 uniform float uKnotSeed[${KNOTS}];
-uniform vec2 uShift[${SHIFTS}];
+uniform vec3 uShift[${SHIFTS}];   // where a galaxy's bar sits off its centre (x, z) and the angle of its axis
 uniform float uShiftSeed[${SHIFTS}];
+uniform vec3 uTint[${SHIFTS}];     // colour of the old stars, where not the usual (x = 0)
 
 // Value noise, 0..1, smoothly interpolated.
 float gnoise(vec3 p) {
@@ -117,8 +119,9 @@ float gColumn(float ya, float yb, float h, float ds) {
 }
 
 // Density of the bulge at a point, relative to its centre.
-float gBulge(vec3 p, vec4 gA, vec4 gD) {
-  return exp(-length(vec3(p.x / gD.w, p.y * gD.x, p.z)) / gA.w);
+float gBulge(vec3 p, vec4 gA, vec4 gD, vec2 turn) {
+  vec2 q = vec2(turn.x * p.x + turn.y * p.z, turn.x * p.z - turn.y * p.x);
+  return exp(-length(vec3(q.x / gD.w, p.y * gD.x, q.y)) / gA.w);
 }
 
 // 0..1: how strongly a point of the disc belongs to a spiral arm (matches armStrengthOf on the CPU).
@@ -198,8 +201,12 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
   float ta = t0;
   // An off-centre bar (the LMC's): the bulge is looked up from a camera shifted the other way.
   vec3 bro = ro;
-  for (int k = 0; k < ${SHIFTS}; k++) if (abs(gC.w - uShiftSeed[k]) < 1e-3) bro -= vec3(uShift[k].x, 0.0, uShift[k].y);
-  float fa = gBulge(bro + rd * t0, gA, gD);
+  vec2 turn = vec2(1.0, 0.0);
+  for (int k = 0; k < ${SHIFTS}; k++) if (abs(gC.w - uShiftSeed[k]) < 1e-3) {
+    bro -= vec3(uShift[k].x, 0.0, uShift[k].y);
+    turn = vec2(cos(uShift[k].z), sin(uShift[k].z));
+  }
+  float fa = gBulge(bro + rd * t0, gA, gD, turn);
   float n = float(steps);
   for (int i = 0; i < steps; i++) {
     float tb = t0 + span * (exp(a * float(i + 1) / n) - 1.0) * norm;
@@ -216,7 +223,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
     float reach = cross ? min(ds, gA.z * 0.5 / max(abs(rd.y), 1e-3)) : ds;
     float reachD = cross ? min(ds, hd / max(abs(rd.y), 1e-3)) : ds;
     // The bulge is smooth: three samples a step integrate it without grain or bands.
-    float fm = gBulge(bro + rd * (ta + 0.5 * ds), gA, gD), fb = gBulge(bro + rd * tb, gA, gD);
+    float fm = gBulge(bro + rd * (ta + 0.5 * ds), gA, gD, turn), fb = gBulge(bro + rd * tb, gA, gD, turn);
     float bulge = ds * (fa + 4.0 * fm + fb) / 6.0;
     fa = fb;
     ta = tb;
@@ -238,10 +245,14 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // Old stars fill a thin disc inside a faint thick one; the young blue ones hug the plane.
       float stars = 0.85 * gColumn(ya, yb, gA.z * 0.7, ds) * 0.66 + 0.15 * gColumn(ya, yb, gA.z * 1.85, ds);
       float newborn = gColumn(ya, yb, gA.z * 0.25, ds) * 1.85;
-      float clump = max(1.0 + (0.4 + gD.y) * 4.0 * (0.5 - clouds), 0.2);
+      // (Seen whole from outside, star clouds are soft swellings of the arms, not a speckle all over the disc.)
+      float clump = max(1.0 + (0.4 + gD.y) * mix(2.2, 4.0, uSettle) * (0.5 - clouds), 0.2);
       float blue = 0.75 * gC.z * young;
       float lit = discLum * radial * (0.3 + 1.3 * arm) * clump * far;
-      e = vec3(1.0, 0.84, 0.66) * (stars * (1.0 - blue) * lit);
+      // (The old stars' colour: warm, but lavender-white in galaxies that are nearly all young, the Magellanic Clouds.)
+      vec3 oldTint = vec3(1.0, 0.84, 0.66);
+      for (int k = 0; k < ${SHIFTS}; k++) if (abs(gC.w - uShiftSeed[k]) < 1e-3 && uTint[k].x > 0.0) oldTint = uTint[k];
+      e = oldTint * (stars * (1.0 - blue) * lit);
       born = vec3(0.52, 0.72, 1.1) * (newborn * blue * lit);
       if (off < 2.5 * gA.z && gB.w > 0.0) {
       // Detail finer than the step, or than a pixel, would only be grain.
@@ -253,7 +264,8 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // The dust: cloud complexes with clear gaps between them (through which the far glow shows, as it does
       // through the real ones), their insides and edges torn into wisps and filaments down to a few light
       // years, as far as the pixels and the march resolve them.
-      float dense = gDust(q, clamp(grain, 1.0, 5.0), mix(2.0, 1.2, smoothstep(1.5 * gA.z, 4.0 * gA.z, abs(ro.y))), 0.55, false, 3) * gDust(q * 4.1 + 11.0, grain * 0.25, 1.3, 0.8, true, 6);
+      float dense = gDust(q, clamp(grain, 1.0, 5.0), mix(2.0, 1.2, smoothstep(1.5 * gA.z, 4.0 * gA.z, abs(ro.y))), 0.55, false, 3) * gDust(q * 4.1 + 11.0, grain * 0.25, mix(0.5, 1.3, uSettle), 0.8, true, 6);
+      // (A single pass on screen, the galaxy seen whole: the finest wisps would only be a speckle of dark dots.)
       // Cloud complexes billow out of the dust layer here and there: the same dust, spread higher.
       // (Samples further apart than the clouds would only turn them into streaks: there the layer is even.)
       float puff = mix(0.45, gnoise(p / (cell * 0.7) + gC.w + 7.0), clamp(1.4 * cell / reachD - 1.0, 0.0, 1.0));
@@ -272,14 +284,15 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
         born += vec3(1.0, 0.32, 0.5) * (discLum * uKnot[k].w * w * gColumn(ya, yb, gA.z * 0.3, ds));
       }
       // It gathers in narrow lanes along the inner edges of the arms, which the star clouds push about.
-      float lane = gLane(theta + LANE_LEAD + 0.5 * (clouds - 0.5) + 0.25 * sway, r, gA, gB);
+      // (Broken up and pushed about by the star clouds: real lanes are ragged arcs, not rings.)
+      float lane = gLane(theta + LANE_LEAD + 1.0 * (clouds - 0.5) + 0.35 * sway, r, gA, gB) * (0.45 + 1.1 * clouds);
       float ring = smoothstep(gA.x * 0.03, gA.x * 0.1, r) * edge;
       // No dust right around the camera: up close a single cloud would fill half the sky. (The Sun sits in
       // such a cavity, the Local Bubble, a few hundred light years across; every camera carries one along.)
       // And the nearest thousand or two light years hold fewer clouds than further on: they would span tens
       // of degrees and cover the sky out of the plane. (Seen from far off, nothing changes.)
       float tc = ta - 0.5 * ds;
-      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, tc) * mix(0.45, 1.0, smoothstep(gA.x * 0.01, gA.x * 0.035, tc));
+      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, tc) * mix(0.3, 1.0, smoothstep(gA.x * 0.01, gA.x * 0.035, tc));
       tau = gB.w * ring * exp(-(r - 0.5 * gA.x) / (1.4 * gA.y)) * (0.1 + 2.6 * lane) * (0.1 + 1.6 * dense) * gas / 2200.0;
       }
     }

@@ -81,6 +81,7 @@ uniform samplerCube uTo;
 uniform vec2 uSizes;    // texels across a face of each map; a draft (coarser than the fine map) is drawn smooth
 uniform float uMix;
 uniform float uGain;
+uniform float uCover;   // how much of the galaxy the map carries: what it hides behind it goes with it
 uniform float uGrain;   // pixels per radian, for the grain of unresolved stars
 varying vec3 vDir;
 
@@ -125,7 +126,7 @@ void main() {
   vec3 cell = floor(d * uGrain * 1.4);
   float s = hash3(cell);
   float grain = 0.84 + 0.65 * s * s * s * s;
-  gl_FragColor = vec4(c.rgb * uGain * grain, c.a);
+  gl_FragColor = vec4(c.rgb * uGain * grain, c.a * uCover);
 }
 `;
 
@@ -256,7 +257,7 @@ export class GalaxyVolume {
     this.sky = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
-      uniforms: { uFrom: { value: null }, uTo: { value: null }, uSizes: { value: new THREE.Vector2(FINE_SIZE, FINE_SIZE) }, uMix: { value: 1 }, uGain: { value: 1 }, uGrain: { value: 1000 } },
+      uniforms: { uFrom: { value: null }, uTo: { value: null }, uSizes: { value: new THREE.Vector2(FINE_SIZE, FINE_SIZE) }, uMix: { value: 1 }, uGain: { value: 1 }, uCover: { value: 1 }, uGrain: { value: 1000 } },
       side: THREE.BackSide, transparent: true, premultipliedAlpha: true, depthTest: false, depthWrite: false,
     });
     this.mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), this.sky);
@@ -280,8 +281,9 @@ export class GalaxyVolume {
   }
 
   /** near: the galaxies to draw, nearest first (at most NEAR_GALAXIES); brightness scales their light without a new march. */
-  update(near: NearGalaxy[], brightness: number, pixelsPerRadian = 1000): void {
+  update(near: NearGalaxy[], brightness: number, pixelsPerRadian = 1000, cover = 1): void {
     this.sky.uniforms.uGrain.value = pixelsPerRadian;
+    this.sky.uniforms.uCover.value = cover;
     const renderer = probeRenderer();
     if (!renderer || near.length === 0) {
       this.mesh.visible = false;
@@ -378,7 +380,8 @@ export class GalaxyVolume {
     const u = this.march.uniforms;
     const f = new THREE.Vector3().copy(centre).normalize();
     const n = new THREE.Vector3().copy(north).normalize();
-    const side = new THREE.Vector3().crossVectors(f, n);
+    // (l = 90 deg is the pole crossed with the centre: the real sky, longitude rising to the left.)
+    const side = new THREE.Vector3().crossVectors(n, f);
     const sum = new Float32Array(width * height * 4);
     const pixels = new Float32Array(width * height * 4);
     const previous = renderer.getRenderTarget();

@@ -13,9 +13,10 @@ const NEAR_START = 6, NEAR_END = 8;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
 const BIG_PX = [650, 1000];
-const INSIDE_GAIN = 0.5, OUTSIDE_GAIN = 1.3;
+// Inside a disc: half of what it was (the band was too bright next to the stars; see the report on calibration).
+const INSIDE_GAIN = 0.25, OUTSIDE_GAIN = 1.3;
 /** Brightness of the surveyed sky inside a disc. */
-const HOME_GAIN = 1.1;
+const HOME_GAIN = 0.55;
 
 const FIELD_VERT = /* glsl */ `
 attribute vec3 iPos;
@@ -187,6 +188,12 @@ export class GalaxyCloud {
   private sparkleWarm = 2;
   private readonly near: NearGalaxy[] = [];
   private readonly eyes = GALAXIES.map(() => ({ x: 0, y: 0, z: 0 }));
+  /** The camera's speed, ly/s, smoothed; and where and when it was last. */
+  private speed = 0;
+  private lastCam = { x: 0, y: 0, z: 0, t: 0 };
+  /** How much the host is the on-screen march's because the camera is too fast for the sky map, smoothed. */
+  private fast = 0;
+  state = { direct: 0, mapped: 0, gain: 0, speed: 0 };
 
   constructor() {
     const n = GALAXIES.length;
@@ -249,8 +256,8 @@ export class GalaxyCloud {
     const pos = new Float32Array(count * 3);
     const col = new Float32Array(count * 3);
     const size = new Float32Array(count);
-    // (The bar lies along the galaxy's own X axis, as gBulge has it.)
-    const turn = 0;
+    // (Along the bar's axis, as gBulge has it.)
+    const turn = g.barAngle ?? 0;
     const bar = g.bar ?? (g.kind === 'barred spiral' ? 1.8 : 1);
     for (let i = 0; i < count; i++) {
       let x = 0, y = 0, z = 0, young = 0;
@@ -360,11 +367,24 @@ export class GalaxyCloud {
     // (What the survey shows, the map leaves.)
     // (Likewise high above the disc, where the whole of it is below the camera: the on-screen march moves with
     // the camera every frame and is as sharp as the screen, where the map would trail it in steps.)
+    // And whenever the camera flies so fast that the sky map would fall behind it (it takes a fraction of a
+    // second to march): then the march on screen follows every frame. (Speeds up and down are smoothed over a
+    // second, so the hand-over is a fade, not a switch.)
+    const t = performance.now() / 1000, dtc = t - this.lastCam.t;
+    if (dtc > 0 && dtc < 0.5) {
+      const v = Math.hypot(cam.x - this.lastCam.x, cam.y - this.lastCam.y, cam.z - this.lastCam.z) / dtc;
+      this.speed += ((host && v > host.galaxy.radius * 2 ? 0 : v) - this.speed) * Math.min(1, dtc * 3);
+    }
+    this.lastCam = { x: cam.x, y: cam.y, z: cam.z, t };
+    const tooFast = host ? THREE.MathUtils.smoothstep(this.speed, host.galaxy.radius * 0.0125, host.galaxy.radius * 0.05) : 0;
+    this.fast += (tooFast - this.fast) * Math.min(1, Math.max(dtc, 0) * 4);
     const direct = host
-      ? Math.max(THREE.MathUtils.smoothstep(span(host), 1.5, 2.1), THREE.MathUtils.smoothstep(Math.abs(host.eye.y) / host.galaxy.radius, 0.25, 0.42))
+      ? Math.max(THREE.MathUtils.smoothstep(span(host), 1.5, 2.1), THREE.MathUtils.smoothstep(Math.abs(host.eye.y) / host.galaxy.radius, 0.25, 0.42), this.fast)
       : 0;
     const mapped = Math.max(0, 1 - direct - (this.survey ? HomeSky.cover(host) : 0));
-    this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped, pixelsPerRadian);
+    /** (For measuring hand-overs: what draws the host, and how bright.) */
+    this.state = { direct, mapped, gain, speed: this.speed };
+    this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped, pixelsPerRadian, mapped);
 
     const f = this.field.uniforms;
     f.uCam.value.set(cam.x, cam.y, cam.z);

@@ -40,6 +40,10 @@ export interface GalaxyData {
   knots?: [number, number, number, number][];
   /** Where the bar's centre sits off the disc's (its own frame, x and z, ly). */
   barShift?: [number, number];
+  /** Direction of the bar's long axis in the galaxy's own plane, atan2(z, x) (radians); unset, along X. */
+  barAngle?: number;
+  /** Colour of its old stars where not the usual warm one (with barShift set). */
+  tint?: [number, number, number];
 }
 
 export const MILKY_WAY_RADIUS = 52000;
@@ -102,10 +106,29 @@ function shape(kind: GalaxyKind, radius: number, rng: Rng): Omit<GalaxyData, 'id
   };
 }
 
+/**
+ * Galactic coordinates (x towards the centre, y towards l = 90 deg, z to the north galactic pole) to the
+ * universe's axes, a proper rotation (determinant +1, the real sky, not its mirror image): l = 0 points from
+ * Sol exactly at the Milky Way's centre, l = 90 deg along the direction the disc turns at Sol, the pole is
+ * the disc's normal. Row-major, universe = GAL_TO_APP * galactic.
+ */
+const SOL_TURN = Math.atan2(SOL.z, SOL.x);
+export const GAL_TO_APP: readonly number[] = [
+  -Math.cos(SOL_TURN), -Math.sin(SOL_TURN), 0,
+  0, 0, 1,
+  -Math.sin(SOL_TURN), Math.cos(SOL_TURN), 0,
+];
+
 /** Galactic longitude / latitude (degrees) and distance from Sol to universe coordinates. */
 export function fromSky(l: number, b: number, dist: number): [number, number, number] {
   const cb = Math.cos(b * DEG);
-  return [SOL.x - dist * cb * Math.cos(l * DEG), SOL.y + dist * Math.sin(b * DEG), SOL.z - dist * cb * Math.sin(l * DEG)];
+  const gx = cb * Math.cos(l * DEG), gy = cb * Math.sin(l * DEG), gz = Math.sin(b * DEG);
+  const m = GAL_TO_APP;
+  return [
+    SOL.x + dist * (m[0] * gx + m[1] * gy + m[2] * gz),
+    SOL.y + dist * (m[3] * gx + m[4] * gy + m[5] * gz),
+    SOL.z + dist * (m[6] * gx + m[7] * gy + m[8] * gz),
+  ];
 }
 
 /** Axes for a galaxy at (l, b) on Sol's sky whose disc is seen `tilt` degrees from face-on from Sol. */
@@ -128,8 +151,12 @@ function build(): GalaxyData[] {
   };
 
   add('Milky Way', 'barred spiral', [0, 0, 0], MILKY_WAY_RADIUS, [1, 0, 0, 0, 1, 0, 0, 0, 1], {
-    discScale: 9500, height: 700, bulgeScale: 1900, bulgeFlat: 1.7, arms: 2, pitchK: 1 / Math.tan(13.5 * DEG), armContrast: 1,
+    // The arms trail the disc's turn (which at Sol is towards l = 90 deg, +Z): seen from the north galactic
+    // pole the Galaxy turns clockwise and its arms wind out anticlockwise, hence the negative pitch. The bar's
+    // near end is at l = +27 deg (Wegg, Gerhard & Portail 2015).
+    discScale: 9500, height: 700, bulgeScale: 1900, bulgeFlat: 1.7, arms: 2, pitchK: -1 / Math.tan(13.5 * DEG), armContrast: 1,
     dust: 1, bulgeLum: 6.0e-4, discLum: 2.7e-4, blue: 0.8, irregular: 0.3, seed: 3.7,
+    barShift: [0, 0], barAngle: Math.atan2(SOL.z, SOL.x) + 27 * DEG,
   });
   // The Local Group and the famous neighbours, roughly where they are on Sol's sky.
   // The Magellanic Clouds. The LMC: a disc seen ~35 deg from face-on with a bar and one ragged arm, some
@@ -140,13 +167,14 @@ function build(): GalaxyData[] {
   add('Large Magellanic Cloud', 'irregular', fromSky(280.5, -32.9, 163e3), 15000, facing(280.5, -32.9, 35, 0.9), {
     // (30 Doradus, the largest; N11 and N44 smaller. The bar sits some 1.5 kly off the disc's centre.)
     // (Brightness: matched to the survey's LMC as seen from Sol, scripts/textures/pano_spot.py.)
-    arms: 1, pitchK: 2.2, armContrast: 0.35, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.085 / 750, discLum: 0.75e-4,
-    discScale: 4500, height: 650, irregular: 0.3, blue: 0.95, dust: 0.5, barShift: [-800, 1200],
+    arms: 1, pitchK: 2.2, armContrast: 0.35, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.16 / 750, discLum: 0.6e-4,
+    discScale: 4500, height: 650, irregular: 0.5, blue: 0.95, dust: 0.5, barShift: [-800, 1200], tint: [0.84, 0.82, 1.0],
     knots: [[3200, 2400, 1800, 2.5], [-5200, -2600, 900, 1.5], [1200, -3600, 700, 1.2]],
   });
   add('Small Magellanic Cloud', 'irregular', fromSky(302.8, -44.3, 200e3), 9000, undefined, {
     // (NGC 346, its brightest star-forming region, and the Wing of young stars reaching towards the LMC.)
     arms: 1, armContrast: 0.15, bar: 2.6, bulgeScale: 1000, bulgeFlat: 1.6, bulgeLum: 0.012 / 450, discLum: 0.8e-4,
+    barShift: [0, 0], tint: [0.82, 0.82, 1.0],
     discScale: 2800, height: 900, irregular: 0.9, blue: 1, dust: 0.3,
     knots: [[600, 300, 700, 2], [3500, 1500, 1600, 1]],
   });

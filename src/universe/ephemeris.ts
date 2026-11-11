@@ -14,6 +14,8 @@
 //
 // Everything here is plain numbers (no three.js) so that it can be checked from Node directly.
 
+import { GAL_TO_APP as SKY_GAL_TO_APP } from './universe';
+
 const DEG = Math.PI / 180;
 const DAY = 86400;
 const CENTURY = 36525 * DAY;
@@ -54,8 +56,9 @@ function det3(m: number[]): number {
   return m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
 }
 
+
 /** Galactic (x to the centre, y to l = 90, z to the north pole) to the app's axes, as fromSky in universe.ts. */
-const GAL_TO_APP = [-1, 0, 0, 0, 0, 1, 0, -1, 0];
+const GAL_TO_APP = [...SKY_GAL_TO_APP];
 
 /** Equatorial J2000 to the app's axes as the sky is laid out (galaxies, the Milky Way survey). */
 export const SKY_EQ_TO_APP: number[] = mul3(GAL_TO_APP, ICRS_TO_GAL);
@@ -68,16 +71,9 @@ const ECL_TO_EQ = [1, 0, 0, 0, ce, -se, 0, se, ce];
 const EQ_TO_ECL = [1, 0, 0, 0, ce, se, 0, -se, ce];
 
 /**
- * The app's sky is a mirror image of the real one: fromSky puts l = 90 on the right of the galactic
- * centre (seen with galactic north up), where the real sky has it on the left, so GAL_TO_APP has
- * determinant -1. Planets and moons can't be mirrored (their maps would read backwards and the
- * day would run the wrong way round the globe), so the Solar System goes in by a proper rotation
- * instead: the sky's mapping followed by a reflection through the ecliptic plane. Every point on
- * the ecliptic lands exactly where the sky has it, so the Sun stands in front of the right part
- * of the Milky Way on every date and the planets follow the zodiac; only ecliptic latitudes come
- * out with the sign reversed against the background (a few degrees for the planets and the Moon).
- * Inside the Solar System everything is a rigid rotation of the real thing: phases, eclipses,
- * seasons, local time, ring tilts. Should the sky become unmirrored, the reflection drops out.
+ * The sky's mapping is a proper rotation (universe.ts), so the Solar System goes in by the same one:
+ * the planets follow the zodiac against the Milky Way and Earth's pole points at the real celestial pole.
+ * (Kept as a check: a mirrored sky would need the Solar System reflected through the ecliptic instead.)
  */
 const ECL_FLIP = det3(SKY_EQ_TO_APP) < 0 ? [1, 0, 0, 0, 1, 0, 0, 0, -1] : [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
