@@ -42,6 +42,22 @@ float curtain(float x, float w, float total) {
   return total * 0.00477 * inversesqrt(s2) * exp(-0.5 * x * x / s2);
 }
 
+// How far from the oval a point is (radians of colatitude), as glow() works it out.
+float ovalOff(vec3 p) {
+  vec3 dir = normalize(p);
+  float s = dot(dir, uSunDir), cz = dot(dir, uPole);
+  return acos(min(abs(cz), 1.0)) - (0.33 + 0.07 * (uActivity - 0.4) - 0.1 * s / max(sqrt(1.0 - cz * cz), 0.2));
+}
+
+// Samples for a stretch of ray from a to b: enough that each moves about 10 km across the ground
+// (the curtains stay sharp), none at all if the stretch passes nowhere near the oval.
+float stepsFor(vec3 ro, vec3 rd, float a, float b) {
+  vec3 pa = ro + rd * a, pb = ro + rd * b, pm = ro + rd * (0.5 * (a + b));
+  if (min(min(abs(ovalOff(pa)), abs(ovalOff(pb))), abs(ovalOff(pm))) > 0.32) return 0.0;
+  float across = (b - a) * length(cross(rd, normalize(pm)));
+  return clamp(ceil(across / 0.0016), 8.0, min(uSteps, float(MAX_STEPS)));
+}
+
 // Light given off per unit length (planet radii) at p.
 vec3 glow(vec3 p) {
   float r = length(p);
@@ -49,14 +65,17 @@ vec3 glow(vec3 p) {
   float alt = (r - uShell.x) / (uShell.y - uShell.x);
   if (alt < 0.0 || alt > 1.0) return vec3(0.0);
   float s = dot(dir, uSunDir);
-  float night = 1.0 - smoothstep(-0.22, 0.08, s);
-  if (night <= 0.0) return vec3(0.0);
+  // Brightest on the night side, fading broadly towards noon (dayside aurora is faint, and drowned by the
+  // sky). Sunlight reaching the upper air does not switch the curtains off: a narrow mask would cut them
+  // along a hard line where the layer passes into sunlight, as seen at twilight.
+  float night = 1.0 - 0.9 * smoothstep(-0.5, 0.7, s);
   float cz = dot(dir, uPole);
   float colat = acos(min(abs(cz), 1.0));
   // The oval sits further from the pole on the side facing away from the star.
   float oval = 0.33 + 0.07 * (uActivity - 0.4) - 0.1 * s / max(sqrt(1.0 - cz * cz), 0.2);
   float off = colat - oval;
-  if (abs(off) > 0.16) return vec3(0.0);
+  // (Wide enough for every wander of the curtains; the arcs fade out well inside it, so it never cuts one.)
+  if (abs(off) > 0.3) return vec3(0.0);
   // The curtains wander, slowly; both hemispheres get their own.
   vec3 q = dir * 7.0 + sign(cz) * 3.0;
   float drift = uTime * 0.012;
@@ -67,15 +86,21 @@ vec3 glow(vec3 p) {
   float a = off - 0.07 * wander - 0.014 * fold - 0.003 * curl;
   float b = off + 0.045 + 0.06 * wander + 0.012 * fold + 0.0025 * curl;
   // Curtains a few kilometres thick, as real ones are (a kilometre or two), with a fainter second arc poleward.
-  float arcs = curtain(a, 0.0006, 1.0) + 0.6 * curtain(b, 0.0005, 0.85);
+  // Further poleward, fainter scattered arcs (the polar cap is never quite empty in a storm).
+  float c3 = off + 0.1 + 0.05 * wander - 0.01 * fold;
+  float arcs = (curtain(a, 0.0006, 1.0) + 0.6 * curtain(b, 0.0005, 0.85) + 0.25 * uActivity * curtain(c3, 0.0007, 0.7))
+    * (1.0 - smoothstep(0.18, 0.28, abs(off)));
   // Never a uniform ring: brightenings travel along the oval (substorms), patches pulse, and quiet
   // stretches fade to almost nothing.
   float along = vnoise(dir * 2.2 + sign(cz) * 5.0 + vec3(uTime * 0.004, 0.0, -uTime * 0.003));
   float surge = vnoise(dir * 6.0 - vec3(0.0, uTime * 0.01, uTime * 0.008));
   float pulse = 0.85 + 0.15 * sin(uTime * 1.3 + surge * 20.0);
   arcs *= smoothstep(0.25, 0.75, along) * (0.4 + 1.6 * surge * surge) * pulse * (0.4 + 1.2 * uActivity);
-  float veil = 0.025 * exp(-off * off * 300.0);
-  if (arcs + veil < 0.004) return vec3(0.0);
+  // The diffuse glow around the curtains, centred on them (on either side alike, so it has no edge of its own).
+  float veil = 0.02 * exp(-a * a * 600.0) + 0.012 * exp(-b * b * 600.0);
+  // (A curtain blurred over a long step gives off little per unit length but a lot in all: the cut-off must be
+  // far below anything visible, or curtains end along a hard line where the steps lengthen.)
+  if (arcs + veil < 1e-5) return vec3(0.0);
   // Rays: brightness varies along a curtain, and each ray reaches its own height.
   float ray = mix(0.5, vnoise(dir * 260.0 + drift * 6.0), clamp(1.5 - gStep * 520.0, 0.0, 1.0));
   float fine = mix(0.5, vnoise(dir * 1100.0 - drift * 9.0), clamp(1.5 - gStep * 2200.0, 0.0, 1.0));
@@ -110,15 +135,17 @@ void main() {
   float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
   vec3 col = vec3(0.0);
   if (a1 > t0) {
-    float dt = (a1 - t0) / uSteps;
+    float n = stepsFor(ro, rd, t0, a1);
+    float dt = (a1 - t0) / max(n, 1.0);
     // (What blurs a curtain is how far each step moves across the ground, not up through the layer.)
     gStep = dt * length(cross(rd, normalize(ro + rd * (0.5 * (t0 + a1)))));
-    for (int i = 0; i < MAX_STEPS; i++) { if (float(i) >= uSteps) break; col += glow(ro + rd * (t0 + (float(i) + jitter) * dt)) * dt; }
+    for (int i = 0; i < MAX_STEPS; i++) { if (float(i) >= n) break; col += glow(ro + rd * (t0 + (float(i) + jitter) * dt)) * dt; }
   }
   if (t1 > b0) {
-    float dt = (t1 - b0) / uSteps;
+    float n = stepsFor(ro, rd, b0, t1);
+    float dt = (t1 - b0) / max(n, 1.0);
     gStep = dt * length(cross(rd, normalize(ro + rd * (0.5 * (b0 + t1)))));
-    for (int i = 0; i < MAX_STEPS; i++) { if (float(i) >= uSteps) break; col += glow(ro + rd * (b0 + (float(i) + jitter) * dt)) * dt; }
+    for (int i = 0; i < MAX_STEPS; i++) { if (float(i) >= n) break; col += glow(ro + rd * (b0 + (float(i) + jitter) * dt)) * dt; }
   }
   col *= uStrength;
   if (col.r + col.g + col.b < 1e-4) discard;
@@ -205,7 +232,8 @@ export class Aurora {
     this.mesh.visible = on > 0.003;
     if (!this.mesh.visible) return;
     u.uStrength.value = on * (this.material.userData.strength as number);
-    u.uSteps.value = Math.round(THREE.MathUtils.lerp(20, 64, low));
+    // The most samples a ray may take (each takes what it needs, see stepsFor).
+    u.uSteps.value = Math.round(THREE.MathUtils.lerp(24, 64, low));
     u.uCenter.value.copy(rel);
     u.uSunDir.value.copy(sunDir);
     u.uTime.value = realTime;

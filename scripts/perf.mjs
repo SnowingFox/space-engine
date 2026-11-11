@@ -68,6 +68,9 @@ Object.assign(VIEWS, {
   // Orbital sunrise from 1 636 km: the Sun just over the limb (the user's seam report).
   Lsunrise: ["limbSun(1636, 20, 28, 60, 35)"],
   Lsunrise400: ["limbSun(400, 15, 22, 60, 35)"],
+  // Dusk from high up (30 km, the Sun 5 degrees below the horizon): the twilight band along the horizon.
+  Lduskhigh: ["poseAt({ kind: 'body', star: 'sol', planet: 2, alt: 30, sun: 1.66, az: 2.3, turn: 3.14, pitch: -0.04 }, 'Earth', 20)"],
+  Lduskhigh2: ["poseAt({ kind: 'body', star: 'sol', planet: 2, alt: 40, sun: 1.7, az: 2.3, turn: 1.57, pitch: -0.05 }, 'Earth', 20)"],
   // The night limb from ISS altitude.
   Llimb: ["poseAt({ kind: 'body', star: 'sol', planet: 2, alt: 420, sun: 2.6, az: 2.3, turn: 0.0, pitch: -0.2 }, 'Earth', 20)"],
   // Mercury from 43 km: the Sun 5 degrees up, in view; and high (40 degrees from the zenith), looking at the ground away from it.

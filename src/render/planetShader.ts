@@ -95,8 +95,9 @@ float craters(vec3 p, float detail, float minFreq) {
     fade *= smoothstep(0.0, 0.1, w.z - w.x);
     // Not every cell holds one (impacts are random, and the smaller ones are many more), and they come
     // in all sizes, most of them small for their cell.
-    float id = w.y, id2 = fract(id * 7.31), age = fract(id * 13.7);
-    fade *= step(id2, 0.45 + 0.03 * float(i));
+    // Most are old: worn down by later impacts to shallow dimples; a few are fresh.
+    float id = w.y, id2 = fract(id * 7.31), age = 1.0 - pow(fract(id * 13.7), 3.0);
+    fade *= step(id2, 0.22 + 0.025 * float(i));
     float r = 0.07 + 0.26 * id * id;
     // Not quite round: a little elongated, a little lobed.
     vec3 rel = q - at;

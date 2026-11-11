@@ -92,7 +92,10 @@ void main() {
   float shimmer = 0.5 + 0.5 * sin(uTime * 1.7 + turn * 40.0);
   float fibres = lobes(turn, 190.0, 0.0) * lobes(turn, 71.0, 7.0) * (0.8 + 0.2 * shimmer);
   float beams = pow(lobes(turn, 18.0, 3.0), 5.0);
-  float rays = (0.45 + 2.2 * fibres + 1.2 * beams) * 0.34 / (1.0 + x * x / 0.0081) * smoothstep(0.0, 0.03, x) * uStreak;
+  // A starburst: many thin rays reaching well beyond the aureole, their lengths uneven.
+  float burst = pow(lobes(turn, 64.0, 9.0), 14.0) * (0.4 + 0.6 * lobes(turn, 16.0, 4.0));
+  float rays = ((0.45 + 2.2 * fibres + 1.2 * beams) * 0.34 / (1.0 + x * x / 0.0081) + burst * 0.5 / (1.0 + x * x / 0.06))
+    * smoothstep(0.0, 0.03, x) * uStreak;
   // The lenticular halo: a faint ring, blue inside and red outside.
   float h = (x - 0.3) / 0.14;
   float ring = exp(-(h - 0.5) * (h - 0.5) * 9.0) * (0.4 + 2.4 * fibres) * 0.008 * uStreak;
@@ -189,12 +192,18 @@ void main() {
     float a = exp(-abs(vUv.x) * 3.5) * exp(-vUv.y * vUv.y * 9.0);
     col = mix(vec3(0.35, 0.55, 1.0), uColor, 0.35) * a * uStreakGain;
   } else {
-    if (r > 1.0) discard;
-    // A soft disc with a brighter rim (kind 1: a ring only), its colour shifting with the glass.
-    float disc = vKind > 0.5 ? exp(-pow((r - 0.85) / 0.08, 2.0)) : smoothstep(1.0, 0.75, r) * (0.55 + 0.45 * smoothstep(0.5, 0.95, r));
+    // The aperture's shape: a hexagon (six iris blades), soft-edged, brighter towards its rim; each colour
+    // focuses a little differently, so the edge is fringed red outside and blue inside (kind 1: a ring only).
+    vec2 q = abs(vUv);
+    float hex = max(q.x * 0.8660254 + q.y * 0.5, q.y);
+    if (hex > 1.05) discard;
+    vec3 rad = hex * vec3(1.0, 1.035, 1.07);
+    vec3 shape = vKind > 0.5
+      ? exp(-pow((rad - 0.86) / 0.07, vec3(2.0)))
+      : smoothstep(vec3(1.0), vec3(0.86), rad) * (0.45 + 0.55 * smoothstep(0.4, 0.95, rad));
     float h = vGhost.x;
     vec3 hue = clamp(vec3(1.5 - abs(h * 3.0 - 0.5), 1.5 - abs(h * 3.0 - 1.5), 1.5 - abs(h * 3.0 - 2.5)) - 0.5, 0.0, 1.0);
-    col = mix(uColor, hue, 0.35) * disc;
+    col = mix(uColor, hue, 0.45) * shape;
   }
   gl_FragColor = vec4(col * uFlare * vInFrame, 1.0);
 }
@@ -380,7 +389,7 @@ export class StarView {
     const lit = (tint.x * 0.3 + tint.y * 0.6 + tint.z * 0.1) * this.visible;
     const f = this.flareMat.uniforms;
     // A few hundredths of the glare at most: noticed, never in the way.
-    f.uFlare.value = lightSwitches.flare ? 0.01 * Math.min(intensity, 1.5) * lit * (1 - closeUp) : 0;
+    f.uFlare.value = lightSwitches.flare ? 0.016 * Math.min(intensity, 1.5) * lit * (1 - closeUp) : 0;
     f.uStreakGain.value = 0.3;
     f.uAspect.value = aspect;
     const s = this.surfaceMat.uniforms;
