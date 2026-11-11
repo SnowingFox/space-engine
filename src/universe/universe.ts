@@ -36,8 +36,10 @@ export interface GalaxyData {
   seed: number;
   /** Elongation of the bulge into a bar (1: round); unset, 1.8 for barred spirals. */
   bar?: number;
-  /** A giant star-forming region (its own frame): x, z, radius (ly), brightness relative to the disc. */
-  knot?: [number, number, number, number];
+  /** Giant star-forming regions (its own frame): x, z, radius (ly), brightness relative to the disc. */
+  knots?: [number, number, number, number][];
+  /** Where the bar's centre sits off the disc's (its own frame, x and z, ly). */
+  barShift?: [number, number];
 }
 
 export const MILKY_WAY_RADIUS = 52000;
@@ -135,12 +137,18 @@ function build(): GalaxyData[] {
   // bar's end (van der Marel & Kallivayalil 2014). The SMC: a lumpy elongated bar of young blue stars, ~5 x 3 deg.
   // (The LMC's axes are set, but random ones are still drawn: every generated galaxy stays as it was.)
   randomAxes(rng);
-  add('Large Magellanic Cloud', 'irregular', fromSky(280.5, -32.9, 163e3), 15000, facing(280.5, -32.9, 35, 2.4), {
-    arms: 1, pitchK: 2.2, armContrast: 0.35, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.35 / 750,
-    discScale: 7000, height: 650, irregular: 0.6, blue: 0.9, dust: 0.5, knot: [3200, 2400, 1700, 12],
+  add('Large Magellanic Cloud', 'irregular', fromSky(280.5, -32.9, 163e3), 15000, facing(280.5, -32.9, 35, 0.9), {
+    // (30 Doradus, the largest; N11 and N44 smaller. The bar sits some 1.5 kly off the disc's centre.)
+    // (Brightness: matched to the survey's LMC as seen from Sol, scripts/textures/pano_spot.py.)
+    arms: 1, pitchK: 2.2, armContrast: 0.35, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.085 / 750, discLum: 0.75e-4,
+    discScale: 4500, height: 650, irregular: 0.3, blue: 0.95, dust: 0.5, barShift: [-800, 1200],
+    knots: [[3200, 2400, 1800, 2.5], [-5200, -2600, 900, 1.5], [1200, -3600, 700, 1.2]],
   });
   add('Small Magellanic Cloud', 'irregular', fromSky(302.8, -44.3, 200e3), 9000, undefined, {
-    arms: 1, armContrast: 0.15, bar: 2.6, bulgeScale: 1000, bulgeFlat: 1.6, bulgeLum: 0.04 / 450, discScale: 2800, height: 900, irregular: 0.9, blue: 1, dust: 0.3,
+    // (NGC 346, its brightest star-forming region, and the Wing of young stars reaching towards the LMC.)
+    arms: 1, armContrast: 0.15, bar: 2.6, bulgeScale: 1000, bulgeFlat: 1.6, bulgeLum: 0.012 / 450, discLum: 0.8e-4,
+    discScale: 2800, height: 900, irregular: 0.9, blue: 1, dust: 0.3,
+    knots: [[600, 300, 700, 2], [3500, 1500, 1600, 1]],
   });
   add('Andromeda (M31)', 'spiral', fromSky(121.2, -21.6, 2.54e6), 76000, undefined, { arms: 2, armContrast: 0.85, blue: 0.7 });
   add('Triangulum (M33)', 'spiral', fromSky(133.6, -31.3, 2.73e6), 30000, undefined, { arms: 3, armContrast: 0.5, blue: 1, irregular: 0.5 });

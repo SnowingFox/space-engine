@@ -10,6 +10,8 @@ const views = [
   ['flying along the plane, 300 ly/s', 'at(20800,20,300); look(-1,0,0.05)', 'move(-300, 0, 0)'],
   ['flying out, 2 kly/s', 'at(26000,300,900); look(-1,-0.25,-0.03)', 'move(0, 2000, 0)'],
   ['Milky Way from 134 kly', 'at(0,120000,60000); look(0,-0.9,-0.45)', ''],
+  ['Andromeda from 120 kly', 'const g=se.galaxy("andromeda").galaxy; const dx=26000-g.x,dy=18-g.y,dz=900-g.z,l=Math.hypot(dx,dy,dz); at(g.x+dx/l*120000,g.y+dy/l*120000,g.z+dz/l*120000); look(-dx,-dy,-dz)', ''],
+  ['Milky Way from 70 kly, oblique', 'at(-30000,40000,50000); look(30000,-40000,-50000)', ''],
   ['NGC 5697, 18.9 kly from centre', 'const g=se.galaxy("NGC 5697").galaxy; const a=g.axes; at(g.x+a[0]*18900+a[3]*700, g.y+a[1]*18900+a[4]*700, g.z+a[2]*18900+a[5]*700); look(-a[0]-a[3]*0.08,-a[1]-a[4]*0.08,-a[2]-a[5]*0.08)', ''],
 ];
 const browser = await puppeteer.launch({
@@ -20,10 +22,14 @@ const browser = await puppeteer.launch({
 });
 console.log('view | mean ms | p95 ms | fps | pixel ratio (max 1.42, floor 0.8)');
 for (const [name, setup, step] of views) {
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: 'load' });
-  await new Promise((r) => setTimeout(r, 1500));
-  const out = await page.evaluate(`new Promise((done) => {
+  // (Another change to the sources reloads the dev server's page mid-measurement: then measure again.)
+  let page, out;
+  for (let attempt = 0; ; attempt++) {
+    try {
+    page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'load' });
+    await new Promise((r) => setTimeout(r, 1500));
+    out = await page.evaluate(`new Promise((done) => {
     const p = se.player;
     const LY = 9.4607e12;
     const at = (x, y, z) => { const g = { x: 0, y: 0, z: 0 }; p.galactic(g); p.local.x += (x - g.x) * LY; p.local.y += (y - g.y) * LY; p.local.z += (z - g.z) * LY; };
@@ -48,6 +54,12 @@ for (const [name, setup, step] of views) {
     };
     requestAnimationFrame(tick);
   })`);
+      break;
+    } catch (e) {
+      await page.close().catch(() => {});
+      if (attempt >= 3) throw e;
+    }
+  }
   console.log(`${name} | ${out[0].toFixed(1)} | ${out[1].toFixed(1)} | ${out[2].toFixed(0)} | ${out[3].toFixed(2)} | ${(out[4] / 1000).toFixed(0)}k texels/frame`);
   await page.close();
 }

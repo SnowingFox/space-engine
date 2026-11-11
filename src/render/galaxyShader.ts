@@ -23,13 +23,19 @@ function makeNoise(): THREE.Data3DTexture {
 /** Bind as the uniform uNoise of every material that includes GALAXY_GLSL. */
 export const galaxyNoise = makeNoise();
 
-const KNOTS = 4;
-/** Spread into the uniforms of every material that includes GALAXY_GLSL: the galaxies' giant star-forming regions. */
+const KNOTS = 8, SHIFTS = 2;
+/**
+ * Spread into the uniforms of every material that includes GALAXY_GLSL: the galaxies' giant star-forming
+ * regions and off-centre bars, each tagged with the seed of its galaxy.
+ */
 export const galaxyKnotUniforms: Record<string, THREE.IUniform> = (() => {
-  const knots = GALAXIES.filter((g) => g.knot).slice(0, KNOTS);
+  const knots = GALAXIES.flatMap((g) => (g.knots ?? []).map((k) => ({ k, seed: g.seed }))).slice(0, KNOTS);
+  const shifts = GALAXIES.filter((g) => g.barShift).slice(0, SHIFTS);
   return {
-    uKnot: { value: Array.from({ length: KNOTS }, (_, i) => new THREE.Vector4(...(knots[i]?.knot ?? [0, 0, 1, 0]))) },
+    uKnot: { value: Array.from({ length: KNOTS }, (_, i) => new THREE.Vector4(...(knots[i]?.k ?? [0, 0, 1, 0]))) },
     uKnotSeed: { value: Array.from({ length: KNOTS }, (_, i) => knots[i]?.seed ?? -1e9) },
+    uShift: { value: Array.from({ length: SHIFTS }, (_, i) => new THREE.Vector2(...(shifts[i]?.barShift ?? [0, 0]))) },
+    uShiftSeed: { value: Array.from({ length: SHIFTS }, (_, i) => shifts[i]?.seed ?? -1e9) },
   };
 })();
 
@@ -48,6 +54,8 @@ uniform highp sampler3D uNoise;
 // Giant star-forming regions (x, z, radius, brightness in the galaxy's frame), each of the galaxy with that seed.
 uniform vec4 uKnot[${KNOTS}];
 uniform float uKnotSeed[${KNOTS}];
+uniform vec2 uShift[${SHIFTS}];
+uniform float uShiftSeed[${SHIFTS}];
 
 // Value noise, 0..1, smoothly interpolated.
 float gnoise(vec3 p) {
@@ -69,6 +77,34 @@ float gfbm(vec3 p, float detail) {
     amp *= 0.56;
   }
   return norm > 0.0 ? sum / norm : 0.5;
+}
+
+// Density relative to its mean, log-normal: ln(density) an fbm of standard deviation 'spread' once all of
+// its octaves (each 'gain' times the last) are resolved; ridged, the noise is folded into filaments and
+// sheets. Octaves too fine to resolve are left out and the result keeps its mean: a blur of many clouds is
+// their average, never a different look.
+float gDust(vec3 p, float detail, float spread, float gain, bool ridged, int octaves) {
+  float sum = 0.0, amp = 1.0, freq = 1.0, full = 0.0, part = 0.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= octaves) break;
+    float fade = clamp(detail / freq - 1.0, 0.0, 1.0);
+    full += amp * amp;
+    if (fade > 0.0) {
+      float n = gnoise(p);
+      if (ridged) {
+        float ridge = 1.0 - abs(2.0 * n - 1.0);
+        sum += amp * fade * (ridge * ridge - 0.4) / 0.26;
+      } else {
+        sum += amp * fade * (n - 0.5) / 0.17;
+      }
+      part += amp * amp * fade * fade;
+    }
+    p = OCTAVE_ROT * p * 2.03 + 17.1;
+    freq *= 2.03;
+    amp *= gain;
+  }
+  float k = spread / sqrt(full);
+  return exp(k * sum - 0.5 * k * k * part);
 }
 
 // Path length through a layer exp(-|y| / h), exactly, between two heights of a straight ray:
@@ -160,7 +196,10 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
   vec3 light = vec3(0.0);
   vec3 trans = vec3(1.0);
   float ta = t0;
-  float fa = gBulge(ro + rd * t0, gA, gD);
+  // An off-centre bar (the LMC's): the bulge is looked up from a camera shifted the other way.
+  vec3 bro = ro;
+  for (int k = 0; k < ${SHIFTS}; k++) if (abs(gC.w - uShiftSeed[k]) < 1e-3) bro -= vec3(uShift[k].x, 0.0, uShift[k].y);
+  float fa = gBulge(bro + rd * t0, gA, gD);
   float n = float(steps);
   for (int i = 0; i < steps; i++) {
     float tb = t0 + span * (exp(a * float(i + 1) / n) - 1.0) * norm;
@@ -177,7 +216,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
     float reach = cross ? min(ds, gA.z * 0.5 / max(abs(rd.y), 1e-3)) : ds;
     float reachD = cross ? min(ds, hd / max(abs(rd.y), 1e-3)) : ds;
     // The bulge is smooth: three samples a step integrate it without grain or bands.
-    float fm = gBulge(ro + rd * (ta + 0.5 * ds), gA, gD), fb = gBulge(ro + rd * tb, gA, gD);
+    float fm = gBulge(bro + rd * (ta + 0.5 * ds), gA, gD), fb = gBulge(bro + rd * tb, gA, gD);
     float bulge = ds * (fa + 4.0 * fm + fb) / 6.0;
     fa = fb;
     ta = tb;
@@ -211,11 +250,14 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       float warp = clamp(grain * 0.25 - 0.5, 0.0, 1.0);
       vec3 q = p / knot + gC.w + 3.1;
       q += warp * 1.4 * vec3(gnoise(q * 0.45 + 31.0) - 0.5, 0.0, gnoise(q * 0.45 + 57.0) - 0.5);
-      float murk = gfbm(q, clamp(grain, 1.0, 64.0));
+      // The dust: cloud complexes with clear gaps between them (through which the far glow shows, as it does
+      // through the real ones), their insides and edges torn into wisps and filaments down to a few light
+      // years, as far as the pixels and the march resolve them.
+      float dense = gDust(q, clamp(grain, 1.0, 5.0), mix(2.0, 1.2, smoothstep(1.5 * gA.z, 4.0 * gA.z, abs(ro.y))), 0.55, false, 3) * gDust(q * 4.1 + 11.0, grain * 0.25, 1.3, 0.8, true, 6);
       // Cloud complexes billow out of the dust layer here and there: the same dust, spread higher.
       // (Samples further apart than the clouds would only turn them into streaks: there the layer is even.)
       float puff = mix(0.45, gnoise(p / (cell * 0.7) + gC.w + 7.0), clamp(1.4 * cell / reachD - 1.0, 0.0, 1.0));
-      float thick = 0.4 + 5.0 * puff * puff;
+      float thick = 0.5 + 2.5 * puff * puff;
       // The layer itself wanders above and below the plane, and its lanes from side to side.
       float sway = (gnoise(p / (cell * 1.5) + gC.w + 19.0) - 0.5) * clamp(3.0 * cell / reachD - 1.0, 0.0, 1.0);
       float lift = sway * gA.z * 0.3;
@@ -229,21 +271,16 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
         float w = exp(-dot(dq, dq) * 2.0) * (0.4 + 1.2 * clouds);
         born += vec3(1.0, 0.32, 0.5) * (discLum * uKnot[k].w * w * gColumn(ya, yb, gA.z * 0.3, ds));
       }
-      // Most of the dust sits in cloud complexes, opaque ones, with clearer space between them.
-      // (From too far to tell them apart, they blend into the lanes along the arms.)
-      // Up close the clouds are opaque with clear gaps between them; a step that blurs many of them sees their average.
-      // (Real dust is that clumpy: most of the extinction near the Sun comes from a few dark clouds.)
-      // From inside the dust layer the nearest clouds are sharp-edged and opaque (a narrow threshold keeps
-      // their edges sharp at every scale the noise resolves); seen from above, the same clouds are soft.
-      float opaque = mix(smoothstep(0.3, 0.8, murk), 3.0 * smoothstep(0.56, 0.6, murk) * (0.5 + murk) + 0.04, inLayer);
-      float dense = mix(0.4, opaque, clamp(grain * 0.5 - 0.8, 0.0, 1.0));
       // It gathers in narrow lanes along the inner edges of the arms, which the star clouds push about.
       float lane = gLane(theta + LANE_LEAD + 0.5 * (clouds - 0.5) + 0.25 * sway, r, gA, gB);
       float ring = smoothstep(gA.x * 0.03, gA.x * 0.1, r) * edge;
       // No dust right around the camera: up close a single cloud would fill half the sky. (The Sun sits in
       // such a cavity, the Local Bubble, a few hundred light years across; every camera carries one along.)
-      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, ta - 0.5 * ds);
-      tau = gB.w * ring * exp(-(r - 0.5 * gA.x) / (1.4 * gA.y)) * (0.1 + 2.6 * lane) * (0.3 + 2.2 * dense) * gas / 2200.0;
+      // And the nearest thousand or two light years hold fewer clouds than further on: they would span tens
+      // of degrees and cover the sky out of the plane. (Seen from far off, nothing changes.)
+      float tc = ta - 0.5 * ds;
+      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, tc) * mix(0.45, 1.0, smoothstep(gA.x * 0.01, gA.x * 0.035, tc));
+      tau = gB.w * ring * exp(-(r - 0.5 * gA.x) / (1.4 * gA.y)) * (0.1 + 2.6 * lane) * (0.1 + 1.6 * dense) * gas / 2200.0;
       }
     }
     e += vec3(1.0, 0.82, 0.58) * (bulgeLum * bulge);

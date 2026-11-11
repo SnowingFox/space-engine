@@ -19,10 +19,14 @@ const browser = await puppeteer.launch({
 });
 console.log('scenario | mean ms | p95 ms | max ms | frames > 25 ms | long tasks (> 50 ms) | pixel ratio at end');
 for (const [name, setup, step] of scenarios) {
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: 'load' });
-  await new Promise((r) => setTimeout(r, 2500));
-  const out = await page.evaluate(`new Promise((done) => {
+  // (Another change to the sources reloads the dev server's page mid-measurement: then measure again.)
+  let page, out;
+  for (let attempt = 0; ; attempt++) {
+    try {
+    page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'load' });
+    await new Promise((r) => setTimeout(r, 2500));
+    out = await page.evaluate(`new Promise((done) => {
     const p = se.player;
     const LY = 9.4607e12;
     const at = (x, y, z) => { const g = { x: 0, y: 0, z: 0 }; p.galactic(g); p.local.x += (x - g.x) * LY; p.local.y += (y - g.y) * LY; p.local.z += (z - g.z) * LY; };
@@ -48,6 +52,12 @@ for (const [name, setup, step] of scenarios) {
     };
     requestAnimationFrame(tick);
   })`);
+      break;
+    } catch (e) {
+      await page.close().catch(() => {});
+      if (attempt >= 3) throw e;
+    }
+  }
   console.log(`${name} | ${out[0].toFixed(1)} | ${out[1].toFixed(1)} | ${out[2].toFixed(0)} | ${out[3]} | ${out[4]} | ${out[5].toFixed(2)}`);
   await page.close();
 }

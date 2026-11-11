@@ -168,7 +168,7 @@ interface Job {
 
 // The draft is the same march as the fine map, only coarser and a single pass: the same galaxy while the
 // camera moves as when it rests, never a different look to hand over from.
-const DRAFT = { size: 384, steps: 160 };
+const DRAFT = { size: 256, steps: 160 };
 const FINE = { size: FINE_SIZE, steps: 160, passes: 12, show: 3 };
 /**
  * Texels marched per frame: as many as the frame rate allows. The budget grows while frames keep to 60 Hz
@@ -208,7 +208,18 @@ export class GalaxyVolume {
   private readonly sky: THREE.ShaderMaterial;
   private readonly march: THREE.ShaderMaterial;
   private readonly quad: FullScreenQuad;
-  private readonly drafts = [this.makeTarget(DRAFT.size), this.makeTarget(DRAFT.size)];
+  // Four drafts: the one fading out, the one fading in, a finished one waiting, and the next being marched.
+  private readonly drafts = Array.from({ length: 4 }, () => this.makeTarget(DRAFT.size));
+  private from: THREE.WebGLCubeRenderTarget | null = null;
+  private fromView: View | null = null;
+  /** A finished draft waiting for the one before it to have faded in fully (a swap before then would jump). */
+  private pending: { target: THREE.WebGLCubeRenderTarget; view: View } | null = null;
+  /** How fast each galaxy's eye moves (ly/s, its own frame), smoothed: drafts are marched for where the camera will be. */
+  private readonly velocity = new Map<number, number[]>();
+  private readonly lastEye = new Map<number, number[]>();
+  /** Seconds a new map takes to fade in: as long as the next draft takes to march, so the sky never stands still between them. */
+  private fadeTime = 0.2;
+  private jobStart = 0;
   private readonly fine = this.makeTarget(FINE.size);
   private shown: THREE.WebGLCubeRenderTarget | null = null;
   private shownView: View | null = null;
@@ -253,6 +264,17 @@ export class GalaxyVolume {
     this.mesh.visible = false;
   }
 
+  /**
+   * For measuring how smoothly the sky follows the camera: the viewpoint (first galaxy's frame, ly) the sky on
+   * screen shows, as the blend of the two maps it fades between; null when none is shown.
+   */
+  shownEye(): number[] | null {
+    const to = this.shownView, from = this.fromView ?? to;
+    if (!to || !from || !this.mesh.visible) return null;
+    const f = this.sky.uniforms.uMix.value as number;
+    return [0, 1, 2].map((i) => from.eyes[i] + (to.eyes[i] - from.eyes[i]) * f);
+  }
+
   private makeTarget(size: number): THREE.WebGLCubeRenderTarget {
     return new THREE.WebGLCubeRenderTarget(size, { type: THREE.HalfFloatType, depthBuffer: false, generateMipmaps: false });
   }
@@ -264,6 +286,7 @@ export class GalaxyVolume {
     if (!renderer || near.length === 0) {
       this.mesh.visible = false;
       this.shown = null;
+      this.pending = null;
       this.job = null;
       return;
     }
@@ -271,6 +294,15 @@ export class GalaxyVolume {
     const dt = Math.min((time - this.lastTime) / 1000, 0.1);
     this.lastTime = time;
     const now = capture(near);
+    for (const n of near) {
+      const e = [n.eye.x, n.eye.y, n.eye.z], last = this.lastEye.get(n.galaxy.id), v = this.velocity.get(n.galaxy.id) ?? [0, 0, 0];
+      // (A jump, a go-to or a teleport, is not a speed: then the camera starts from rest again.)
+      const jump = last ? Math.hypot(e[0] - last[0], e[1] - last[1], e[2] - last[2]) : Infinity;
+      if (!last || jump > n.galaxy.radius * 0.02) v.fill(0);
+      else if (dt > 0) for (let i = 0; i < 3; i++) v[i] += ((e[i] - last[i]) / dt - v[i]) * Math.min(1, dt * 8);
+      this.velocity.set(n.galaxy.id, v);
+      this.lastEye.set(n.galaxy.id, e);
+    }
 
     if (!this.shown || !this.shownView) {
       // Nothing to show yet: the first draft takes a few frames.
@@ -288,15 +320,34 @@ export class GalaxyVolume {
       this.job = null;
       if (this.shown !== this.fine) this.finePasses = 0;
     }
-    this.fade = Math.min(1, this.fade + dt / 0.2);
-    // A new march starts only once the last one has faded in: it overwrites the map being faded out.
-    if (!this.job && this.fade >= 1) {
-      if (stale(this.shownView!, now)) {
-        const target = this.shown === this.drafts[0] ? this.drafts[1] : this.drafts[0];
-        this.job = { target, view: now, steps: DRAFT.steps, face: 0, row: 0, pass: 0 };
+    this.fade = Math.min(1, this.fade + dt / this.fadeTime);
+    if (this.pending && this.fade >= 1) {
+      this.show(this.pending.target, this.pending.view);
+      this.pending = null;
+    }
+    // While the camera moves, drafts follow one another without a pause: each fades in over the time the
+    // next one takes, so the sky glides from one viewpoint to the next instead of jumping. And each is
+    // marched for where the camera will be when it is half faded in, so the sky keeps pace with the camera
+    // instead of trailing it.
+    // (Moving at all, it drafts on and on: waiting until the camera is a tolerance away would step the sky.)
+    const v0 = this.velocity.get(near[0].galaxy.id) ?? [0, 0, 0];
+    const moving = Math.hypot(v0[0], v0[1], v0[2]) > now.tolerance * 0.5;
+    const newest = this.pending?.view ?? this.shownView!;
+    const free = this.drafts.find((d) => d !== this.shown && d !== this.from && d !== this.pending?.target);
+    if (!this.job && free && (!this.pending || moving)) {
+      if (moving || stale(newest, now)) {
+        const target = free;
+        const ahead = near.map((n) => {
+          const v = this.velocity.get(n.galaxy.id) ?? [0, 0, 0];
+          // (Never further ahead than a little of the galaxy: a guess, not a jump.)
+          const lead = Math.min(1.8 * this.fadeTime, (n.galaxy.radius * 0.01) / Math.max(Math.hypot(v[0], v[1], v[2]), 1e-9));
+          return { ...n, eye: { x: n.eye.x + v[0] * lead, y: n.eye.y + v[1] * lead, z: n.eye.z + v[2] * lead } };
+        });
+        this.job = { target, view: capture(ahead), steps: DRAFT.steps, face: 0, row: 0, pass: 0 };
+        this.jobStart = time;
         this.finePasses = 0;
-        this.setGalaxies(near);
-      } else if (this.finePasses < FINE.passes) {
+        this.setGalaxies(ahead);
+      } else if (this.fade >= 1 && !this.pending && this.finePasses < FINE.passes) {
         // At rest: a sharper map first, then more passes averaged into it until the grain of the march is gone.
         this.job = { target: this.fine, view: now, steps: FINE.steps, face: 0, row: 0, pass: this.finePasses };
         this.setGalaxies(near);
@@ -367,6 +418,7 @@ export class GalaxyVolume {
     // The sky map's own job must start again: its uniforms were used.
     this.job = null;
     this.shown = null;
+    this.pending = null;
     this.shownView = null;
     return sum;
   }
@@ -440,12 +492,23 @@ export class GalaxyVolume {
     if (job.target === this.fine) this.finePasses = job.pass + 1;
     // The fine map is noisy until a few passes are in: until then the draft stays up.
     if (job.pass !== (job.target === this.fine ? FINE.show - 1 : 0)) return;
-    const from = this.shown ?? job.target;
+    const took = THREE.MathUtils.clamp((performance.now() - this.jobStart) / 1000, 0.08, 0.6);
+    // (A newer draft replaces one still waiting: the waiting one is out of date.)
+    if (this.shown && this.fade < 1) this.pending = { target: job.target, view: job.view };
+    else this.show(job.target, job.view);
+    // The next map fades in over as long as this one took to march.
+    this.fadeTime = job.target === this.fine ? 0.3 : took * 1.1;
+  }
+
+  /** Starts fading from what is on screen to a finished map. */
+  private show(target: THREE.WebGLCubeRenderTarget, view: View): void {
+    const from = (this.from = this.shown ?? target);
+    this.fromView = this.shownView ?? view;
     this.sky.uniforms.uFrom.value = from.texture;
-    this.sky.uniforms.uTo.value = job.target.texture;
-    this.sky.uniforms.uSizes.value.set(from.width, job.target.width);
+    this.sky.uniforms.uTo.value = target.texture;
+    this.sky.uniforms.uSizes.value.set(from.width, target.width);
     this.fade = this.shown ? 0 : 1;
-    this.shown = job.target;
-    this.shownView = job.view;
+    this.shown = target;
+    this.shownView = view;
   }
 }

@@ -12,7 +12,7 @@ import { SOFT_LAYER, softLayer } from './pipeline';
 const NEAR_START = 6, NEAR_END = 8;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
-const BIG_PX = [450, 700];
+const BIG_PX = [650, 1000];
 const INSIDE_GAIN = 0.5, OUTSIDE_GAIN = 1.3;
 /** Brightness of the surveyed sky inside a disc. */
 const HOME_GAIN = 1.1;
@@ -105,7 +105,7 @@ varying vec2 vQuad;
 void main() {
   vec4 col = vec4(0.0);
   if (vMode.y < 1.0) {
-    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, int(vMode.z), marchJitter(gl_FragCoord.xy), 2.0 / uPixelsPerRadian) * (1.0 - vMode.y);
+    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
   }
   if (vMode.y > 0.0) col.rgb += vSpot.rgb * (exp(-dot(vQuad, vQuad) * vSpot.a) * vMode.y);
   gl_FragColor = col * vMode.x;
@@ -149,6 +149,18 @@ function glowOf(g: GalaxyData): number[] {
     disc * (0.84 - 0.09 * young) + bulge * 0.82,
     disc * (0.66 + 0.34 * young) + bulge * 0.58,
   ];
+}
+
+/** 0..1, how much of a dust lane a point of a disc is in (the march's gLane, with its lead on the arms). */
+function laneOf(g: GalaxyData, x: number, z: number): number {
+  const r = Math.max(Math.hypot(x, z), 1);
+  const th = Math.atan2(z, x);
+  const warped = th + 0.2 * Math.sin(r / (g.radius * 0.1) + g.seed) + 0.08 * Math.sin(3 * th + r / (g.radius * 0.048));
+  const phase = g.arms * (warped + 0.16 - g.pitchK * Math.log(r / (g.radius * 0.077)));
+  const major = Math.pow(0.5 + 0.5 * Math.cos(phase), 8);
+  const minor = Math.pow(0.5 + 0.5 * Math.cos(2 * phase + 1.3), 10) * 0.5;
+  const core = THREE.MathUtils.clamp((r - g.radius * 0.048) / (g.radius * 0.096), 0, 1);
+  return THREE.MathUtils.lerp(0.35, THREE.MathUtils.lerp(0.3, Math.min(1, major + minor), g.armContrast), core);
 }
 
 function gamma(rng: Rng, k: number, scale: number): number {
@@ -225,29 +237,57 @@ export class GalaxyCloud {
     });
   }
 
-  /** The brightest stars and clusters of a disc, which stay sharp when the galaxy fills the view from outside. */
+  /**
+   * The brightest stars and clusters of a disc, which stay sharp when the galaxy fills the view from outside.
+   * They are drawn from the same model as the glow: young blue ones along the arms, old yellow ones between
+   * them and in the bulge and bar, none past the disc's edge; and those in the dust lanes are dimmed and
+   * reddened as the glow is there.
+   */
   private makeSparkle(g: GalaxyData): THREE.Points {
     const rng = new Rng(7001 + g.id);
     const count = Math.round(26000 * Math.min(1, g.radius / 40000));
     const pos = new Float32Array(count * 3);
     const col = new Float32Array(count * 3);
     const size = new Float32Array(count);
-    const tints = [[0.7, 0.8, 1.0], [0.7, 0.8, 1.0], [1.0, 1.0, 1.0], [1.0, 0.72, 0.42]];
+    // (The bar lies along the galaxy's own X axis, as gBulge has it.)
+    const turn = 0;
+    const bar = g.bar ?? (g.kind === 'barred spiral' ? 1.8 : 1);
     for (let i = 0; i < count; i++) {
-      let rad = 0, th = 0;
-      for (let tries = 0; tries < 14; tries++) {
-        rad = Math.min(gamma(rng, 2, g.discScale), g.radius * rng.range(0.9, 1.05));
-        th = rng.range(0, Math.PI * 2);
-        // The same wobble the march gives the arms.
-        const warped = th + 0.2 * Math.sin(rad / (g.radius * 0.1) + g.seed) + 0.08 * Math.sin(3 * th + rad / (g.radius * 0.048));
-        const arm = armStrengthOf(g, rad * Math.cos(warped), rad * Math.sin(warped));
-        if (rng.next() < 0.05 + 0.95 * arm) break;
+      let x = 0, y = 0, z = 0, young = 0;
+      if (rng.next() < 0.14) {
+        // The bulge and bar: old stars, an exponential ellipsoid along the bar.
+        const r = gamma(rng, 3, g.bulgeScale);
+        const u = rng.range(-1, 1), ph = rng.range(0, Math.PI * 2), sq = Math.sqrt(1 - u * u);
+        const bx = r * sq * Math.cos(ph) * bar, bz = r * sq * Math.sin(ph);
+        x = bx * Math.cos(turn) - bz * Math.sin(turn);
+        z = bx * Math.sin(turn) + bz * Math.cos(turn);
+        y = (r * u) / g.bulgeFlat;
+      } else {
+        let rad = 0, th = 0, arm = 0;
+        for (let tries = 0; tries < 20; tries++) {
+          rad = gamma(rng, 2, g.discScale);
+          if (rad > g.radius) continue;
+          th = rng.range(0, Math.PI * 2);
+          // The same wobble the march gives the arms.
+          const warped = th + 0.2 * Math.sin(rad / (g.radius * 0.1) + g.seed) + 0.08 * Math.sin(3 * th + rad / (g.radius * 0.048));
+          arm = armStrengthOf(g, rad * Math.cos(warped), rad * Math.sin(warped));
+          if (rng.next() < 0.05 + 0.95 * arm) break;
+        }
+        const blur = g.radius * 0.006;
+        x = rad * Math.cos(th) + rng.gauss() * blur;
+        z = rad * Math.sin(th) + rng.gauss() * blur;
+        young = arm * THREE.MathUtils.smoothstep(rad / g.radius, 0.05, 0.3) * g.blue;
+        y = rng.gauss() * g.height * (0.25 + 0.5 * (1 - young));
       }
-      const blur = g.radius * 0.01;
-      pos.set([rad * Math.cos(th) + rng.gauss() * blur, rng.gauss() * g.height * 0.3, rad * Math.sin(th) + rng.gauss() * blur], i * 3);
+      pos.set([x, y, z], i * 3);
       // Few are bright, most barely show.
       const gain = Math.min(0.13 * Math.pow(Math.max(rng.next(), 1e-4), -0.5), 1.8);
-      col.set(rng.pick(tints).map((c) => c * gain), i * 3);
+      // Behind the dust of the lanes (on the inner edges of the arms, as the march has them).
+      const r = Math.hypot(x, z);
+      const lane = r > g.radius * 0.03 ? laneOf(g, x, z) : 0;
+      const veil = Math.exp(-2.2 * g.dust * lane * Math.exp(-Math.abs(y) / (g.height * 0.3)));
+      const tint = rng.next() < young ? [0.62, 0.78, 1.0] : rng.next() < 0.5 ? [1.0, 0.92, 0.8] : [1.0, 0.72, 0.45];
+      col.set([tint[0] * gain * Math.pow(veil, 0.8), tint[1] * gain * veil, tint[2] * gain * Math.pow(veil, 1.35)], i * 3);
       size[i] = rng.range(0.8, 1.3) + 0.5 * Math.min(gain, 1.2);
     }
     const geometry = new THREE.BufferGeometry();
@@ -318,7 +358,11 @@ export class GalaxyCloud {
     // so leaving the disc changes the perspective and nothing else. Only well outside, where the whole galaxy
     // is in view and a march of its few layers on screen draws the same thing sharper, does that take over.
     // (What the survey shows, the map leaves.)
-    const direct = host ? THREE.MathUtils.smoothstep(span(host), 1.5, 2.1) : 0;
+    // (Likewise high above the disc, where the whole of it is below the camera: the on-screen march moves with
+    // the camera every frame and is as sharp as the screen, where the map would trail it in steps.)
+    const direct = host
+      ? Math.max(THREE.MathUtils.smoothstep(span(host), 1.5, 2.1), THREE.MathUtils.smoothstep(Math.abs(host.eye.y) / host.galaxy.radius, 0.25, 0.42))
+      : 0;
     const mapped = Math.max(0, 1 - direct - (this.survey ? HomeSky.cover(host) : 0));
     this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped, pixelsPerRadian);
 

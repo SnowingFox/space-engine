@@ -69,6 +69,20 @@ def main():
         Image.fromarray(np.concatenate(rows, axis=0), "RGB").save(a.out)
         print(a.out)
         return
+    # Structure in the band (|b| < 20 deg), in log brightness: how much of it at fine (< 1 deg), mid (1-4 deg) and
+    # coarse (4-16 deg) scales, and how well model and survey agree at each (correlation).
+    ppd = w / 360.0
+    rows = np.abs(b) < 20
+    lg = lambda im: np.log(im.mean(axis=2) + 0.02 * ms)
+    def bands(im):
+        L = lg(im)
+        blur = lambda x, deg: cv2.GaussianBlur(x, (0, 0), max(deg * ppd, 0.5))
+        b0, b1, b4, b16 = L, blur(L, 0.5), blur(L, 2.0), blur(L, 8.0)
+        return [(x - y)[rows] for x, y in ((b0, b1), (b1, b4), (b4, b16))]
+    bs, bm = bands(sv), bands(model)
+    names = ("fine <1 deg", "mid 1-4 deg", "coarse 4-16 deg")
+    for n, x, y in zip(names, bs, bm):
+        print("%-16s rms survey %.3f model %.3f  correlation %.2f" % (n, x.std(), y.std(), np.corrcoef(x.ravel(), y.ravel())[0, 1]))
     ratio = np.log2((model.mean(axis=2) + 0.01 * ms) / (sv.mean(axis=2) + 0.01 * ms))
     diff = np.zeros((h, w, 3), np.uint8)
     diff[..., 0] = np.clip(ratio, 0, 3) / 3 * 255
