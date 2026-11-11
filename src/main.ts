@@ -512,9 +512,11 @@ function frame(now: number): void {
     const light = view.starlight;
     const off = tmp.set(0, 0, -1).applyQuaternion(player.quat).angleTo(tmp2.copy(player.local).negate());
     const edge = Math.atan(Math.tan(THREE.MathUtils.degToRad(fov) / 2) * Math.hypot(1, pipeline.camera.aspect));
-    const inView = 1 - THREE.MathUtils.smoothstep(off, 0.75 * edge, 1.1 * edge);
+    // Even from Neptune the Sun is a thousand times brighter than the full Moon: in view, or just
+    // outside it (its glare still reaches into the frame), the eye stops down and the Milky Way all but goes.
+    const inView = 1 - THREE.MathUtils.smoothstep(off, 1.0 * edge, 1.8 * edge);
     const power = Math.min(Math.pow(view.star.brightness, 0.3), 1) * Math.min(0.3 * light.x + 0.6 * light.y + 0.1 * light.z, 1);
-    dazzle = 0.85 * inView * THREE.MathUtils.smoothstep(power, 0.05, 0.6);
+    dazzle = 0.93 * inView * THREE.MathUtils.smoothstep(power, 0.02, 0.2);
   }
   const air = low?.body.atmosphere;
   const depth = air ? 1 - THREE.MathUtils.smoothstep(player.altitude / low!.body.radius, 0, low!.view.atmoTop - 1) : 0;
