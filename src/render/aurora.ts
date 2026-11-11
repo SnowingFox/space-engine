@@ -90,20 +90,25 @@ vec3 glow(vec3 p) {
   float c3 = off + 0.1 + 0.05 * wander - 0.01 * fold;
   float arcs = (curtain(a, 0.0006, 1.0) + 0.6 * curtain(b, 0.0005, 0.85) + 0.25 * uActivity * curtain(c3, 0.0007, 0.7))
     * (1.0 - smoothstep(0.18, 0.28, abs(off)));
+  // The diffuse glow around the curtains, centred on them (on either side alike, so it has no edge of its own).
+  float veil = 0.02 * exp(-a * a * 600.0) + 0.012 * exp(-b * b * 600.0);
+  // Most samples lie in the glow between the curtains, where the patterns along them do not show: there
+  // they take their mean values, and the noise below is only looked up near a curtain.
+  bool near = arcs > 2e-3 * veil;
   // Never a uniform ring: brightenings travel along the oval (substorms), patches pulse, and quiet
   // stretches fade to almost nothing.
   float along = vnoise(dir * 2.2 + sign(cz) * 5.0 + vec3(uTime * 0.004, 0.0, -uTime * 0.003));
-  float surge = vnoise(dir * 6.0 - vec3(0.0, uTime * 0.01, uTime * 0.008));
+  float surge = near ? vnoise(dir * 6.0 - vec3(0.0, uTime * 0.01, uTime * 0.008)) : 0.5;
   float pulse = 0.85 + 0.15 * sin(uTime * 1.3 + surge * 20.0);
-  arcs *= smoothstep(0.25, 0.75, along) * (0.4 + 1.6 * surge * surge) * pulse * (0.4 + 1.2 * uActivity);
-  // The diffuse glow around the curtains, centred on them (on either side alike, so it has no edge of its own).
-  float veil = 0.02 * exp(-a * a * 600.0) + 0.012 * exp(-b * b * 600.0);
+  float patchy = smoothstep(0.25, 0.75, along);
+  arcs *= patchy * (0.4 + 1.6 * surge * surge) * pulse * (0.4 + 1.2 * uActivity);
+  veil *= 0.3 + 0.7 * patchy;
   // (A curtain blurred over a long step gives off little per unit length but a lot in all: the cut-off must be
   // far below anything visible, or curtains end along a hard line where the steps lengthen.)
   if (arcs + veil < 1e-5) return vec3(0.0);
   // Rays: brightness varies along a curtain, and each ray reaches its own height.
-  float ray = mix(0.5, vnoise(dir * 260.0 + drift * 6.0), clamp(1.5 - gStep * 520.0, 0.0, 1.0));
-  float fine = mix(0.5, vnoise(dir * 1100.0 - drift * 9.0), clamp(1.5 - gStep * 2200.0, 0.0, 1.0));
+  float ray = near ? mix(0.5, vnoise(dir * 260.0 + drift * 6.0), clamp(1.5 - gStep * 520.0, 0.0, 1.0)) : 0.5;
+  float fine = near ? mix(0.5, vnoise(dir * 1100.0 - drift * 9.0), clamp(1.5 - gStep * 2200.0, 0.0, 1.0)) : 0.5;
   float lively = 0.25 + 1.5 * ray * ray * (0.5 + fine);
   // Rays flicker a little, each at its own few hertz.
   lively *= 1.0 + 0.08 * sin(uTime * (6.0 + 40.0 * fine) + ray * 30.0);

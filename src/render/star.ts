@@ -13,6 +13,7 @@ uniform vec3 uColor;
 uniform float uTime;
 uniform vec3 uCamObj;
 uniform float uGain;
+uniform vec3 uTint;     // what the way here leaves of the light (air in front reddens and dims it)
 varying vec3 vObj;
 void main() {
   vec3 n = normalize(vObj);
@@ -38,7 +39,7 @@ void main() {
   float limb = 0.32 + 0.68 * pow(mu, 0.55);
   float warmth = smoothstep(0.25, 1.0, heat * limb);
   vec3 tint = mix(uColor * uColor * vec3(1.0, 0.55, 0.28), uColor * vec3(1.0, 0.96, 0.88), warmth);
-  gl_FragColor = vec4(tint * heat * limb * uGain, 1.0);
+  gl_FragColor = vec4(tint * heat * limb * uGain * uTint, 1.0);
   ${LOGDEPTH_FRAG}
 }
 `;
@@ -226,6 +227,8 @@ export class StarView {
   // Glare forms in the eye, not in the sky: part of it spills over whatever stands next to the star.
   private readonly spillMat: THREE.ShaderMaterial;
   private readonly tint = new THREE.Vector3(1, 1, 1);
+  /** The starlight tint without the occlusion share (the disc's own pixels are hidden by depth). */
+  private readonly tintAir = new THREE.Vector3(1, 1, 1);
   private readonly flareMat: THREE.ShaderMaterial;
   private readonly probeMat: THREE.ShaderMaterial;
   private readonly probes: { query: WebGLQuery | null; pending: boolean; passed: boolean }[] = [];
@@ -241,9 +244,13 @@ export class StarView {
     this.surfaceMat = new THREE.ShaderMaterial({
       vertexShader: PLANET_VERT,
       fragmentShader: STAR_FRAG,
-      uniforms: { uColor: { value: this.color }, uTime: { value: 0 }, uCamObj: { value: new THREE.Vector3() }, uGain: { value: 4 } },
+      uniforms: { uColor: { value: this.color }, uTime: { value: 0 }, uCamObj: { value: new THREE.Vector3() }, uGain: { value: 4 }, uTint: { value: this.tintAir } },
+      // Drawn over the sky (which would otherwise hide the disc behind its own brightness), dimmed instead
+      // by the air in front through uTint.
+      transparent: true, blending: THREE.NoBlending,
     });
     const surface = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64), this.surfaceMat);
+    surface.renderOrder = 1.2;
     surface.scale.setScalar(this.radiusKm);
     this.group.add(surface);
 
@@ -353,6 +360,7 @@ export class StarView {
     const aspect = canvas && canvas.height > 0 ? canvas.width / canvas.height : 1;
     this.visible += (this.visibleNow - this.visible) * 0.5;
     this.tint.copy(tint).multiplyScalar(this.visible);
+    this.tintAir.copy(tint);
     const dist = Math.max(rel.length(), this.radiusKm * 1.0001);
     const dAu = dist / KM_PER_AU;
     const brightness = this.brightness = this.star.lum / (dAu * dAu);
@@ -395,7 +403,9 @@ export class StarView {
     const s = this.surfaceMat.uniforms;
     s.uTime.value = realTime;
     // A distant disc is a dazzling point; close by, the eye adapts and the surface shows its texture.
-    s.uGain.value = 4 - 2.2 * THREE.MathUtils.smoothstep(ratio, 0.03, 0.25);
+    // While the glare is on, the disc must be at least as bright as the glare's core around it, or a large
+    // close star shows as a dim disc inside a bright ring.
+    s.uGain.value = (4 - 2.2 * THREE.MathUtils.smoothstep(ratio, 0.03, 0.25)) * (1 + 6 * (1 - closeUp) * Math.min(intensity, 1.4) / 1.4);
     s.uCamObj.value.copy(rel).multiplyScalar(-1 / this.radiusKm);
   }
 

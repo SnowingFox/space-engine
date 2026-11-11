@@ -42,7 +42,9 @@ void main() {
       gMapGiven = smoothstep(-5.0, -7.0, log2(uHeightInfo.z * 0.15915494 * 0.45 / detail));
     }
     float h = terrain(n, detail, rough);
-    float f0 = detail > FINE_FREQ ? fineRelief(vFine, detail, rough) : 0.0;
+    // (Half the pixel's own frequency: the slope is taken across neighbouring pixels, so an octave as fine as
+    // a pixel would turn into a checker of noise in the shading.)
+    float f0 = detail > 2.0 * FINE_FREQ ? fineRelief(vFine, detail * 0.5, rough) : 0.0;
     // The slope comes from how the height changes across neighbouring pixels: one terrain
     // evaluation per pixel instead of three. The fine layer is differenced on its own
     // because added to h it would vanish in float32.
