@@ -225,6 +225,18 @@ export class Player {
     }
     const end = parkingDistance(ap.target);
 
+    if (ap.target.kind === 'galaxy') {
+      // Arrive above the disc at an angle, so a spiral shows its arms rather than its edge.
+      const a = ap.target.galaxy.axes;
+      const normal = q1Vec.set(a[3], a[4], a[5]);
+      const side = sideVec.copy(offset).addScaledVector(normal, -offset.dot(normal));
+      if (side.lengthSq() < 1e-6) side.set(a[0], a[1], a[2]);
+      side.normalize();
+      const pref = normal.multiplyScalar(Math.sign(offset.dot(normal)) || 1).multiplyScalar(0.8).addScaledVector(side, 0.6).normalize();
+      // Turn towards it only on the last stretch, not across intergalactic space.
+      const near = 1 - THREE.MathUtils.smoothstep(dist / end, 1.5, 6);
+      offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
+    }
     if (ap.target.kind === 'body') {
       // Swing around to the sunlit side so arrivals show a lit, slightly gibbous disk.
       const starPos = targetPosition({ kind: 'star', star: ap.target.star }, this.anchor, simTime, q1Vec);

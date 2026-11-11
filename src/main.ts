@@ -7,7 +7,8 @@ import { buildLabels, labelAt, type LabelLayout } from './game/labels';
 import { Player, type Obstacle, type OrbitPivot } from './game/player';
 import { SCENIC_SPOTS, type BodyPose, type ScenicPose } from './game/scenic';
 import { aimPose, galacticToLocal, resolveBodyPose, spaceQuat } from './game/scenicPose';
-import { parkingDistance, sameTarget, targetName, targetPosition, targetRadius, type Target } from './game/target';
+import { galaxyTarget, parkingDistance, sameTarget, targetName, targetPosition, targetRadius, type Target } from './game/target';
+import { GALAXIES, NAMED_GALAXIES, nearestGalaxy, type GalaxyData } from './universe/universe';
 import { makeDeepField } from './render/deepField';
 import { GalaxyCloud } from './render/galaxyCloud';
 import { Pipeline } from './render/pipeline';
@@ -216,8 +217,27 @@ function pickAt(x: number, y: number): Target | null {
     if (best) return best;
   }
   player.galactic(gal);
-  const star = starfield.pick(gal, dir);
-  return star ? { kind: 'star', star } : null;
+  const galaxy = pickGalaxy(dir);
+  // Over a galaxy, only a star clicked squarely wins over the galaxy itself.
+  const star = starfield.pick(gal, dir, galaxy ? 0.004 : 0.014);
+  if (star) return { kind: 'star', star };
+  return galaxy ? galaxyTarget(galaxy) : null;
+}
+
+/** The galaxy under a view direction, if any (not the one the camera is inside). */
+function pickGalaxy(dir: THREE.Vector3): GalaxyData | null {
+  let best: GalaxyData | null = null;
+  let bestScore = Infinity;
+  for (const g of GALAXIES) {
+    const dx = g.x - gal.x, dy = g.y - gal.y, dz = g.z - gal.z;
+    const d = Math.hypot(dx, dy, dz);
+    if (d < g.radius * 1.1) continue;
+    const apparent = Math.asin(Math.min(g.radius / d, 1));
+    const ang = Math.acos(THREE.MathUtils.clamp((dx * dir.x + dy * dir.y + dz * dir.z) / d, -1, 1));
+    const reach = Math.max(apparent * 0.7, 0.012);
+    if (ang < reach && ang / reach < bestScore) { bestScore = ang / reach; best = g; }
+  }
+  return best;
 }
 
 input.onClick = (x, y, double) => {
@@ -248,7 +268,11 @@ function searchObjects(query: string): Target[] {
   };
   if (view) addSystem(view.system);
   if (q !== '' || !view) addSystem(generateSystem(sol));
-  if (selected && q !== '') addSystem(generateSystem(selected.star));
+  if (selected && q !== '' && !selected.star.virtual) addSystem(generateSystem(selected.star));
+  // Galaxies: the catalogued ones are listed even before anything is typed.
+  const galaxies = GALAXIES.map((g) => ({ g, r: rank(g.name) })).filter((h) => h.r >= 0 && (q !== '' || h.g.id < NAMED_GALAXIES));
+  galaxies.sort((a, b) => a.r - b.r || a.g.id - b.g.id);
+  for (const h of galaxies.slice(0, q === '' ? NAMED_GALAXIES : 20)) out.push(galaxyTarget(h.g));
 
   if (q !== '') {
     // The starfield has no public listing yet; read its streamed levels directly.
@@ -346,7 +370,7 @@ function updateAnchor(): void {
 
   const dist = player.local.length();
   if (view && (view.system.star.id !== player.anchor.id || dist > SYSTEM_UNLOAD_KM)) unloadSystem();
-  if (!view && dist < SYSTEM_LOAD_KM) loadSystem(player.anchor);
+  if (!view && dist < SYSTEM_LOAD_KM && !player.anchor.virtual) loadSystem(player.anchor);
 }
 
 function loadSystem(star: StarData): void {
@@ -490,12 +514,17 @@ function frame(now: number): void {
   } else if (view) {
     place = player.anchor.name;
     placeDetail = `Distance ${formatDistance(Math.max(player.local.length() - view.star.radiusKm, 0))}`;
-  } else if (galCenterDist < GALAXY_RADIUS * 1.2) {
-    place = 'Milky Way';
-    placeDetail = `${formatDistance(galCenterDist * KM_PER_LY)} from centre`;
   } else {
-    place = 'Intergalactic space';
-    placeDetail = `${formatDistance(galCenterDist * KM_PER_LY)} from Milky Way`;
+    // In or near a galaxy, name it; out between them, say how far home is.
+    const g = nearestGalaxy(gal.x, gal.y, gal.z);
+    const fromG = Math.hypot(g.x - gal.x, g.y - gal.y, g.z - gal.z);
+    if (fromG < g.radius * 3) {
+      place = g.name;
+      placeDetail = `${formatDistance(fromG * KM_PER_LY)} from centre`;
+    } else {
+      place = 'Intergalactic space';
+      placeDetail = `${formatDistance(galCenterDist * KM_PER_LY)} from Milky Way`;
+    }
   }
   hud.frame({
     mode: flightMode(),
@@ -579,6 +608,11 @@ Object.assign(window, {
     /** Curation: turn/pitch that centre another body (planet index, moon index; -1 = the star) from a body pose. */
     scenicAim: (pose: BodyPose, planet: number, moon?: number) => aimPose(pose, sol, planet, moon),
     getView: () => view,
+    /** A galaxy's target by (part of) its name, for go / select. */
+    galaxy: (name: string) => {
+      const g = GALAXIES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
+      return g ? galaxyTarget(g) : null;
+    },
     stats: () => ({ fps, patches: nearBody?.view.patchCount ?? 0, altitude: player.altitude }),
     generateSystem,
     /** Flight and time state, for scripted checks. */

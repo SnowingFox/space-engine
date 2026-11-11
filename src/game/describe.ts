@@ -2,6 +2,8 @@ import { EARTH_RADIUS_KM, KM_PER_AU, SUN_RADIUS_KM } from '../core/units';
 import { GM_EARTH, GM_SUN, type BodyData, type PlanetType, type Rgb } from '../universe/bodies';
 import { temperatureToRgb, type StarData } from '../universe/stars';
 import { generateSystem } from '../universe/system';
+import { MILKY_WAY, type GalaxyKind } from '../universe/universe';
+import { KM_PER_LY } from '../core/units';
 import { formatDistance, formatDuration, num } from './format';
 import type { Target } from './target';
 
@@ -27,7 +29,13 @@ function temperatureClass(k: number): string {
 }
 
 /** One line in SpaceEngine's style: "Temperate terra with life", "G2 V main-sequence star". */
+const GALAXY_KIND: Record<GalaxyKind, string> = {
+  spiral: 'Spiral galaxy', 'barred spiral': 'Barred spiral galaxy', elliptical: 'Elliptical galaxy',
+  lenticular: 'Lenticular galaxy', irregular: 'Irregular galaxy',
+};
+
 export function describe(t: Target): string {
+  if (t.kind === 'galaxy') return GALAXY_KIND[t.galaxy.kind];
   if (t.kind === 'star') {
     const s = t.star;
     const m = /^([A-Z]+\d*)(.*)$/.exec(s.cls);
@@ -43,6 +51,7 @@ export function describe(t: Target): string {
 
 /** Shorter label for lists: "Planet", "Moon", "Star". */
 export function kindLabel(t: Target): string {
+  if (t.kind === 'galaxy') return GALAXY_KIND[t.galaxy.kind];
   if (t.kind === 'star') return `${t.star.cls} star`;
   return t.body.parent ? `Moon of ${t.body.parent.name}` : `Planet of ${t.star.name}`;
 }
@@ -57,6 +66,17 @@ function atmosphere(b: BodyData): string {
 
 /** Label / value pairs for the info panel. Distance is live and added by the HUD. */
 export function properties(t: Target): [string, string][] {
+  if (t.kind === 'galaxy') {
+    const g = t.galaxy;
+    const fromHome = Math.hypot(g.x - MILKY_WAY.x, g.y - MILKY_WAY.y, g.z - MILKY_WAY.z) * KM_PER_LY;
+    const rows: [string, string][] = [
+      ['Diameter', formatDistance(2 * g.radius * KM_PER_LY)],
+      ['Type', GALAXY_KIND[g.kind]],
+    ];
+    if (g.kind === 'spiral' || g.kind === 'barred spiral') rows.push(['Spiral arms', `${g.arms}`]);
+    if (g.id !== MILKY_WAY.id) rows.push(['From the Milky Way', formatDistance(fromHome)]);
+    return rows;
+  }
   if (t.kind === 'star') {
     const s = t.star;
     const r = s.radius * SUN_RADIUS_KM;
@@ -96,6 +116,9 @@ const srgb = (c: Rgb, gain = 1) =>
 
 /** A small shaded-sphere swatch for lists and the system browser. */
 export function swatch(t: Target): string {
+  if (t.kind === 'galaxy') {
+    return 'radial-gradient(circle at 50% 50%, #fff6e0 0%, #d8b98a 18%, rgba(140,150,190,0.55) 50%, rgba(40,50,80,0) 72%)';
+  }
   if (t.kind === 'star') {
     const c = temperatureToRgb(t.star.temp);
     return `radial-gradient(circle at 50% 50%, #fff 0%, ${srgb(c)} 55%, ${srgb(c, 0.55)} 100%)`;

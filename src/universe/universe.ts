@@ -134,6 +134,7 @@ function build(): GalaxyData[] {
   add('Virgo A (M87)', 'elliptical', fromSky(283.8, 74.5, 53.5e6), 66000);
   add('NGC 1300', 'barred spiral', fromSky(213.7, -55.5, 61e6), 55000, undefined, { arms: 2, armContrast: 1 });
 
+  catalogued = list.length;
   const kinds: GalaxyKind[] = ['spiral', 'spiral', 'spiral', 'barred spiral', 'elliptical', 'lenticular', 'irregular', 'irregular'];
   const place = (cx: number, cy: number, cz: number, spread: number, clusterKind: GalaxyKind | null): void => {
     const x = cx + rng.gauss() * spread, y = cy + rng.gauss() * spread, z = cz + rng.gauss() * spread;
@@ -165,7 +166,10 @@ function build(): GalaxyData[] {
   return list;
 }
 
+let catalogued = 0;
 export const GALAXIES: GalaxyData[] = build();
+/** The real, catalogued galaxies come first in GALAXIES; the generated ones follow. */
+export const NAMED_GALAXIES = catalogued;
 export const MILKY_WAY = GALAXIES[0];
 
 /** Universe position to a galaxy's own frame. */

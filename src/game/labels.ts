@@ -6,7 +6,7 @@ import { sameTarget, targetName, targetPosition, targetRadius, type Target } fro
 export interface LabelItem {
   key: string;
   text: string;
-  cls: 'star' | 'planet' | 'moon';
+  cls: 'star' | 'planet' | 'moon' | 'galaxy';
   /** Screen position of the object's centre, CSS px. */
   x: number;
   y: number;
@@ -129,7 +129,7 @@ export function buildLabels(
 
   if (selected && !selectedShown) {
     rel.copy(targetPosition(selected, player.anchor, simTime, rel)).sub(player.local);
-    add('selected', selected, selected.kind === 'star' ? 'star' : 'planet', rel, targetRadius(selected), 1);
+    add('selected', selected, selected.kind === 'body' ? 'planet' : selected.kind, rel, targetRadius(selected), 1);
   }
 
   // Declutter: the selection first, then the star, then the nearest bodies. A label is
