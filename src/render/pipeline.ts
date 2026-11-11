@@ -4,6 +4,7 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { LensPass } from './lensPass';
 
 /** Objects on this layer of the background scene are diffuse glows, drawn at reduced resolution. */
 export const SOFT_LAYER = 1;
@@ -18,6 +19,13 @@ const SOFT_VERT = /* glsl */ `
 varying vec2 vUv;
 void main() {
   vUv = uv;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+const BG_VERT = /* glsl */ `
+varying vec2 vUv;
+void main() {
+  vUv = position.xy * 0.5 + 0.5;
   gl_Position = vec4(position.xy, 0.0, 1.0);
 }
 `;
@@ -39,7 +47,8 @@ void main() {
   vec3 c = vec3(0.0);
   for (int j = 0; j < 4; j++)
   for (int i = 0; i < 4; i++) {
-    c += texture2D(tScene, vUv + (vec2(float(i), float(j)) - 1.5) * uTexel).rgb;
+    // (Clamped: a star's glare in view would otherwise pull the exposure down and leave the scene dim.)
+    c += min(texture2D(tScene, vUv + (vec2(float(i), float(j)) - 1.5) * uTexel).rgb, vec3(3.0));
   }
   float lum = dot(c / 16.0, vec3(0.2126, 0.7152, 0.0722));
   gl_FragColor = vec4(vec3(clamp((log2(max(lum, 1e-6)) + 12.0) / 20.0, 0.0, 1.0)), 1.0);
@@ -61,6 +70,9 @@ export class Pipeline {
   readonly camera = new THREE.PerspectiveCamera(60, 1, 0.001, 1e16);
   private readonly composer: EffectComposer;
   private readonly bloom: UnrealBloomPass;
+  readonly lens: LensPass;
+  /** The buffer holding the frame as shown (before tone mapping), for the light meter. */
+  private shown!: THREE.WebGLRenderTarget;
   // The galaxy's glow is hundreds of thousands of overlapping sprites; blending them at
   // full multisampled resolution costs more than everything else in the frame.
   /** Eye adaptation: exposure follows the brightness of what is on screen. */
@@ -81,6 +93,8 @@ export class Pipeline {
   }));
   private readonly meterPixels = new Uint8Array(METER_W * METER_H * 4);
   private meterBusy = false;
+  private meterSince = 0;
+  private meterRead = 0;
   private exposureGoal = 1;
   private frameCount = 0;
   private lastFrame = 0;
@@ -93,6 +107,10 @@ export class Pipeline {
   private upDelay = 3000;
   private lastUp = -1e9;
   private readonly softTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+  // The background has no edges to smooth, so it is drawn without multisampling and copied in as the
+  // first thing in the main pass: one multisampled pass (and one resolve) per frame instead of two.
+  private readonly bgTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+  private readonly bgQuad: THREE.Mesh;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -105,12 +123,30 @@ export class Pipeline {
     this.renderer.toneMappingExposure = 1.0;
 
     const target = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    // Nothing after the main pass reads depth: resolving it would only cost bandwidth.
+    target.resolveDepthBuffer = false;
     this.composer = new EffectComposer(this.renderer, target);
-    this.composer.addPass(new RenderPass(this.bgScene, this.bgCamera));
     const main = new RenderPass(this.scene, this.camera);
-    main.clear = false;
-    main.clearDepth = true;
     this.composer.addPass(main);
+    const tri = new THREE.BufferGeometry();
+    tri.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
+    this.bgQuad = new THREE.Mesh(tri, new THREE.ShaderMaterial({
+      vertexShader: BG_VERT, fragmentShader: SOFT_FRAG, uniforms: { tSoft: { value: this.bgTarget.texture } },
+      depthTest: false, depthWrite: false, blending: THREE.NoBlending,
+    }));
+    this.bgQuad.frustumCulled = false;
+    // First of the opaque objects, under everything.
+    this.bgQuad.renderOrder = -1e9;
+    this.scene.add(this.bgQuad);
+    // Gravitational lensing by black holes in view (lensPass.ts); disabled, and free, when there are none.
+    this.lens = new LensPass(this.bgScene);
+    this.composer.addPass(this.lens);
+    // The lens writes the whole frame once more: into a single-sampled buffer (its rays have no edges for
+    // multisampling to smooth; a 4x target would cost four times the bandwidth plus a resolve). After each frame
+    // the buffers are put back so that the main pass always draws into the multisampled one.
+    this.composer.renderTarget2.dispose();
+    this.composer.renderTarget2 = this.composer.writeBuffer = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+    this.composer.readBuffer = this.composer.renderTarget1;
     this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.45, 0.6, 1.7);
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
@@ -162,6 +198,7 @@ export class Pipeline {
   private applyScale(): void {
     this.composer.setPixelRatio(this.pixelRatio);
     this.composer.setSize(window.innerWidth, window.innerHeight);
+    this.bgTarget.setSize(this.composer.renderTarget1.width, this.composer.renderTarget1.height);
     // The soft layer is where a galaxy that fills the view is marched: when frames run long it gives way first.
     const soft = Math.min(this.pixelRatio, Math.max(SOFT_RES * this.resScale, 0.45));
     this.softTarget.setSize(Math.ceil(window.innerWidth * soft), Math.ceil(window.innerHeight * soft));
@@ -196,14 +233,18 @@ export class Pipeline {
   private meterExposure(dt: number): void {
     if (!this.autoExposure) {
       this.exposureGoal = 1;
-    } else if (this.frameCount % 6 === 0 && !this.meterBusy) {
+    } else if (this.frameCount % 6 === 0 && (!this.meterBusy || performance.now() - this.meterSince > 500)) {
+      // (A read the GPU never answers would otherwise freeze the exposure for good: after half a second, ask again.)
+      const read = ++this.meterRead;
+      this.meterSince = performance.now();
       const mat = this.meter.material as THREE.ShaderMaterial;
-      mat.uniforms.tScene.value = this.composer.readBuffer.texture;
+      mat.uniforms.tScene.value = this.shown.texture;
       this.renderer.setRenderTarget(this.meterTarget);
       this.meter.render(this.renderer);
       this.renderer.setRenderTarget(null);
       this.meterBusy = true;
       this.renderer.readRenderTargetPixelsAsync(this.meterTarget, 0, 0, METER_W, METER_H, this.meterPixels).then(() => {
+        if (read !== this.meterRead) return;
         this.meterBusy = false;
         // Average the lit part of the frame in stops; black space and the faint glow of galaxies say nothing about how bright the scene is.
         let sum = 0, lit = 0;
@@ -245,7 +286,14 @@ export class Pipeline {
     this.bgCamera.layers.set(0);
     this.dimMat.opacity = this.skyDim;
     this.dimMat.visible = this.skyDim > 0.002;
+    this.renderer.setRenderTarget(this.bgTarget);
+    this.renderer.render(this.bgScene, this.bgCamera);
+    // (The composer puts back whatever target was bound when it started.)
+    this.renderer.setRenderTarget(null);
     this.composer.render();
+    // (The output pass swaps after reading: what it showed is now the write buffer.)
+    this.shown = this.composer.writeBuffer;
+    if (this.composer.readBuffer !== this.composer.renderTarget1) this.composer.swapBuffers();
     this.meterExposure(dt);
   }
 }

@@ -25,7 +25,7 @@ function buildSystem(star: StarData): SystemData {
 
   const rng = new Rng(hash32(star.id, 0xbeef));
   const maxPlanets = star.kind === 'dwarf' ? 3 : star.kind === 'main' ? 9 : 5;
-  const count = rng.int(star.kind === 'main' ? 2 : 0, maxPlanets);
+  const count = star.noPlanets ? 0 : rng.int(star.kind === 'main' ? 2 : 0, maxPlanets);
   const lumRoot = Math.sqrt(star.lum);
   const frostLine = 2.7 * lumRoot;
   // Keep the first orbit clear of the stellar surface.

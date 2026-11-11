@@ -103,7 +103,7 @@ function shape(kind: GalaxyKind, radius: number, rng: Rng): Omit<GalaxyData, 'id
 }
 
 /** Galactic longitude / latitude (degrees) and distance from Sol to universe coordinates. */
-function fromSky(l: number, b: number, dist: number): [number, number, number] {
+export function fromSky(l: number, b: number, dist: number): [number, number, number] {
   const cb = Math.cos(b * DEG);
   return [SOL.x - dist * cb * Math.cos(l * DEG), SOL.y + dist * Math.sin(b * DEG), SOL.z - dist * cb * Math.sin(l * DEG)];
 }

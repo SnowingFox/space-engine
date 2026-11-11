@@ -240,6 +240,18 @@ export class Player {
       const near = 1 - THREE.MathUtils.smoothstep(dist / end, 1.5, 6);
       offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
     }
+    if (ap.target.kind === 'blackhole') {
+      // Arrive a little above the plane of the disc, where its far side shows lensed over the shadow.
+      const [nx, ny, nz] = ap.target.bh.axis;
+      const normal = q1Vec.set(nx, ny, nz);
+      const up = Math.sign(offset.dot(normal)) || 1;
+      const side = sideVec.copy(offset).addScaledVector(normal, -offset.dot(normal));
+      if (side.lengthSq() < 1e-6) side.set(1, 0, 0).addScaledVector(normal, -normal.x);
+      side.normalize();
+      const pref = side.multiplyScalar(Math.cos(0.2)).addScaledVector(normal, Math.sin(0.2) * up).normalize();
+      const near = 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40);
+      offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
+    }
     if (ap.target.kind === 'body') {
       // Swing around to the sunlit side so arrivals show a lit, slightly gibbous disk.
       const starPos = targetPosition({ kind: 'star', star: ap.target.star }, this.anchor, simTime, q1Vec);

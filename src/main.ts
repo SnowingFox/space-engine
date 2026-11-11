@@ -11,7 +11,13 @@ import { galaxyTarget, parkingDistance, sameTarget, targetName, targetPosition, 
 import { GALAXIES, NAMED_GALAXIES, nearestGalaxy, type GalaxyData } from './universe/universe';
 import { makeDeepField } from './render/deepField';
 import { GalaxyCloud } from './render/galaxyCloud';
+import { Nebulae } from './render/nebulae';
 import { Pipeline } from './render/pipeline';
+import { BlackHoles } from './render/blackHole';
+import { blackHoleTarget, nebulaTarget } from './game/target';
+import { NEBULAE, nebulaAt, type NebulaData } from './universe/nebulae';
+import type { LabelSource } from './game/labels';
+import { BLACK_HOLES } from './universe/blackHoles';
 import { initProbe } from './render/probe';
 import { Starfield } from './render/starfield';
 import { SystemView, type BodyState } from './render/systemView';
@@ -33,7 +39,8 @@ initProbe(pipeline.renderer);
 const input = new Input(canvas);
 const starfield = new Starfield(pipeline.pixelRatio);
 const cloud = new GalaxyCloud();
-pipeline.bgScene.add(makeDeepField(pipeline.pixelRatio), cloud.group, starfield.group);
+const nebulae = new Nebulae();
+pipeline.bgScene.add(makeDeepField(pipeline.pixelRatio), cloud.group, nebulae.group, starfield.group);
 /** Where the camera was last frame (galactic, ly), for motion blur. */
 const lastGal = new THREE.Vector3(NaN, 0, 0);
 const travel = new THREE.Vector3();
@@ -45,6 +52,9 @@ const EXPOSURE = 1 / 30;
 const sol = makeSol(SOL_POS.x, SOL_POS.y, SOL_POS.z);
 const earth: Target = { kind: 'body', star: sol, body: generateSystem(sol).planets[2] };
 const player = new Player(sol);
+/** Black holes: lensing, discs and jets (lensPass.ts), distant ones as points, and the keep-out zone. */
+const holes = new BlackHoles(pipeline.bgScene, pipeline.lens, pipeline.pixelRatio);
+pipeline.lens.warm(pipeline.renderer);
 
 /** The bloom pass, if the pipeline has one that can be switched. */
 const bloomPass = (pipeline as unknown as { bloom?: { enabled: boolean } }).bloom ?? null;
@@ -235,14 +245,34 @@ function pickAt(x: number, y: number): Target | null {
     if (best) return best;
   }
   player.galactic(gal);
-  const galaxy = pickGalaxy(dir);
-  // Over a galaxy, only a star clicked squarely wins over the galaxy itself.
-  const star = starfield.pick(gal, dir, galaxy ? 0.004 : 0.014);
+  const hole = holes.pick(dir, gal);
+  if (hole) return hole;
+  // Nebulae are in front of the other galaxies; over either, only a star clicked squarely wins.
+  const nebula = pickNebula(dir);
+  const galaxy = nebula ? null : pickGalaxy(dir);
+  const star = starfield.pick(gal, dir, galaxy || nebula ? 0.004 : 0.014);
   if (star) return { kind: 'star', star };
+  if (nebula) return nebulaTarget(nebula);
   return galaxy ? galaxyTarget(galaxy) : null;
 }
 
+/** The nebula under a view direction, if any (not one the camera is inside). */
+function pickNebula(dir: THREE.Vector3): NebulaData | null {
+  let best: NebulaData | null = null;
+  let bestScore = 1;
+  for (const n of NEBULAE) {
+    const score = Nebulae.hit(n, gal, dir);
+    if (score < bestScore) { bestScore = score; best = n; }
+  }
+  return best;
+}
+
 /** The galaxy under a view direction, if any (not the one the camera is inside). */
+/** A black hole of a generated galaxy (only listed in search on a match). */
+function generatedHole(b: { galaxy: GalaxyData | null; kind: string }): boolean {
+  return b.kind === 'supermassive' && !!b.galaxy && b.galaxy.id >= NAMED_GALAXIES;
+}
+
 function pickGalaxy(dir: THREE.Vector3): GalaxyData | null {
   let best: GalaxyData | null = null;
   let bestScore = Infinity;
@@ -292,10 +322,19 @@ function searchObjects(query: string): Target[] {
   if (view) addSystem(view.system);
   if (q !== '' || !view) addSystem(generateSystem(sol));
   if (selected && q !== '' && !selected.star.virtual) addSystem(generateSystem(selected.star));
+  // Nebulae, by name or catalogue number (M42, NGC 2237...): all listed before anything is typed.
+  const rankNebula = (n: NebulaData) => Math.min(...[n.name, ...n.aliases].map(rank).map((r) => (r < 0 ? 9 : r)));
+  const nebs = NEBULAE.map((n) => ({ n, r: rankNebula(n) })).filter((h) => h.r < 9);
+  nebs.sort((a, b) => a.r - b.r || a.n.id - b.n.id);
+  for (const h of nebs) out.push(nebulaTarget(h.n));
   // Galaxies: the catalogued ones are listed even before anything is typed.
   const galaxies = GALAXIES.map((g) => ({ g, r: rank(g.name) })).filter((h) => h.r >= 0 && (q !== '' || h.g.id < NAMED_GALAXIES));
   galaxies.sort((a, b) => a.r - b.r || a.g.id - b.g.id);
   for (const h of galaxies.slice(0, q === '' ? NAMED_GALAXIES : 20)) out.push(galaxyTarget(h.g));
+  // Black holes: the real ones are listed before anything is typed, the generated ones (named after their galaxy) on a match.
+  const bhs = BLACK_HOLES.map((b) => ({ b, r: rank(b.name) })).filter((h) => h.r >= 0 && (q !== '' || !generatedHole(h.b)));
+  bhs.sort((a, b) => a.r - b.r || a.b.id - b.b.id);
+  for (const h of bhs.slice(0, 20)) out.push(blackHoleTarget(h.b));
 
   if (q !== '') {
     // The starfield has no public listing yet; read its streamed levels directly.
@@ -453,6 +492,7 @@ function frame(now: number): void {
   const prevSimTime = simTime;
   simTime += simDt;
   simClock.t = simTime;
+  holes.rideAlong(player, prevSimTime, simTime);
 
   let obstacles: Obstacle[] = [];
   if (view) {
@@ -481,6 +521,7 @@ function frame(now: number): void {
     }
   }
 
+  obstacles = obstacles.concat(holes.obstacles(player, simTime));
   player.update(dt, input, obstacles, simTime, { pivot: orbitPivot(), fov: settings.fov, sensitivity: settings.mouseSensitivity });
   // Wait for the real height map too, or the ground would move once it arrives.
   if (hoverAlt !== null && nearBody?.view.ground != null && nearBody.view.ready) {
@@ -504,12 +545,14 @@ function frame(now: number): void {
   }
 
   pipeline.setView(player.quat, fov);
+  holes.update(player, simTime, simDt, fov, pipeline.camera.aspect, pipeline.pixelsPerRadian, pipeline.pixelRatio);
   // Eyes adapt to the dark on a night side or at dusk; in open space the sky stays as dark as it is.
   const low = nearBody as BodyState | null;
   pipeline.maxExposure = low ? 1 + 3 * (1 - THREE.MathUtils.smoothstep(player.altitude / low.body.radius, 0.02, 0.3)) : 1;
 
   player.galactic(gal);
   cloud.update(gal, pipeline.pixelsPerRadian, 1);
+  nebulae.update(gal, pipeline.bgCamera, pipeline.renderer, pipeline.pixelsPerRadian, pipeline.pixelRatio);
   travel.set(gal.x - lastGal.x, gal.y - lastGal.y, gal.z - lastGal.z);
   lastGal.set(gal.x, gal.y, gal.z);
   // (A jump, e.g. to a scenic spot or after a reload, is not a flight: no blur from it.)
@@ -536,20 +579,28 @@ function frame(now: number): void {
   dazzle = Math.max(dazzle, 0.8 * pipeline.daylight);
   pipeline.skyDim += (dazzle - pipeline.skyDim) * (1 - Math.exp(-dt / 0.4));
 
-  layout = buildLabels(view, player, selected, simTime, pipeline.camera, window.innerWidth, window.innerHeight, settings.labels, hud.occupied(now));
+  layout = buildLabels(view, player, selected, simTime, pipeline.camera, window.innerWidth, window.innerHeight, settings.labels, hud.occupied(now), [...holes.labels(), ...nebulaLabels()]);
   hud.setLabels(layout);
 
   const near = nearBody as BodyState | null;
   const galCenterDist = Math.hypot(gal.x, gal.y, gal.z);
   let place: string;
   let placeDetail: string;
-  if (near) {
+  const hole = holes.near && holes.near.ro < 2e4 ? holes.near : null;
+  if (hole) {
+    place = hole.bh.name;
+    placeDetail = `${formatDistance(hole.dist)} from centre (${hole.ro < 100 ? hole.ro.toFixed(1) : Math.round(hole.ro).toLocaleString('en-US')} r_s)`;
+  } else if (near) {
     place = near.body.name;
     const surface = near.view.ground ?? near.body.radius;
     placeDetail = `Altitude ${formatDistance(Math.max(near.rel.length() - surface, 0))}`;
   } else if (view) {
     place = player.anchor.name;
     placeDetail = `Distance ${formatDistance(Math.max(player.local.length() - view.star.radiusKm, 0))}`;
+  } else if (nebulaAt(gal.x, gal.y, gal.z)) {
+    const n = nebulaAt(gal.x, gal.y, gal.z)!;
+    place = n.name;
+    placeDetail = `${formatDistance(Math.hypot(n.x - gal.x, n.y - gal.y, n.z - gal.z) * KM_PER_LY)} from centre`;
   } else {
     // In or near a galaxy, name it; out between them, say how far home is.
     const g = nearestGalaxy(gal.x, gal.y, gal.z);
@@ -577,12 +628,27 @@ function frame(now: number): void {
     selected,
     // (A galaxy has no surface: the distance is to its centre.)
     selectedDist: selected
-      ? Math.max(targetPosition(selected, player.anchor, simTime, tmp).distanceTo(player.local) - (selected.kind === 'galaxy' ? 0 : targetRadius(selected)), 0)
+      ? Math.max(targetPosition(selected, player.anchor, simTime, tmp).distanceTo(player.local) - (selected.kind === 'galaxy' || selected.kind === 'nebula' ? 0 : targetRadius(selected)), 0)
       : 0,
   }, now);
 
   pipeline.render();
   requestAnimationFrame(frame);
+}
+
+/** Names on the sky for the nebulae big enough to see as more than a speck (and not filling the view). */
+const nebulaSources: LabelSource[] = NEBULAE.map((n) => ({ target: nebulaTarget(n), rel: new THREE.Vector3(), radius: n.radius * KM_PER_LY, fade: 0 }));
+function nebulaLabels(): LabelSource[] {
+  player.galactic(gal);
+  const ppr = window.innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(settings.fov) / 2));
+  for (const src of nebulaSources) {
+    const n = (src.target as { nebula: NebulaData }).nebula;
+    src.rel.set((n.x - gal.x) * KM_PER_LY, (n.y - gal.y) * KM_PER_LY, (n.z - gal.z) * KM_PER_LY);
+    const d = Math.hypot(n.x - gal.x, n.y - gal.y, n.z - gal.z);
+    const px = d > n.radius ? Math.asin(n.radius / d) * ppr : Infinity;
+    src.fade = THREE.MathUtils.smoothstep(px, 3, 7);
+  }
+  return nebulaSources;
 }
 
 /** Debug: hover above a body's sunlit side at a given altitude (km), facing the horizon. */
@@ -641,12 +707,27 @@ requestAnimationFrame(frame);
 // Handy for debugging and automated screenshots from the console.
 Object.assign(window, {
   se: {
-    player, pipeline, starfield, cloud, input, hud, settings, go, land, home, select, placeAt, hover, earth, scenic,
+    player, pipeline, starfield, cloud, nebulae, input, hud, settings, go, land, home, select, placeAt, hover, earth, scenic,
     scenicSpots: SCENIC_SPOTS,
     /** Curation: turn/pitch that centre another body (planet index, moon index; -1 = the star) from a body pose. */
     scenicAim: (pose: BodyPose, planet: number, moon?: number) => aimPose(pose, sol, planet, moon),
     getView: () => view,
+    /** A black hole's target by (part of) its name, for go / select. */
+    blackHole: (name: string) => {
+      const b = BLACK_HOLES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
+      return b ? blackHoleTarget(b) : null;
+    },
+    holes,
+    /** A target's position now, km relative to the camera's anchor star. */
+    targetPos: (t: Target) => targetPosition(t, player.anchor, simTime, new THREE.Vector3()),
     /** A galaxy's target by (part of) its name, for go / select. */
+    /** A nebula's target by (part of) its name or a catalogue number, for go / select. */
+    nebula: (name: string) => {
+      const q = name.toLowerCase();
+      const n = NEBULAE.find((x) => [x.name, ...x.aliases].some((a) => a.toLowerCase() === q))
+        ?? NEBULAE.find((x) => [x.name, ...x.aliases].some((a) => a.toLowerCase().includes(q)));
+      return n ? nebulaTarget(n) : null;
+    },
     galaxy: (name: string) => {
       const g = GALAXIES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
       return g ? galaxyTarget(g) : null;

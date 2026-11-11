@@ -3,7 +3,9 @@ import { ECL_TO_APP } from '../universe/ephemeris';
 import { GM_EARTH, GM_SUN, orbitPosition, phaseName, simClock, type BodyData, type PlanetType, type Rgb } from '../universe/bodies';
 import { temperatureToRgb, type StarData } from '../universe/stars';
 import { generateSystem } from '../universe/system';
-import { MILKY_WAY, type GalaxyKind } from '../universe/universe';
+import type { BlackHoleData } from '../universe/blackHoles';
+import type { NebulaData } from '../universe/nebulae';
+import { MILKY_WAY, SOL, type GalaxyKind } from '../universe/universe';
 import { KM_PER_LY } from '../core/units';
 import { formatDistance, formatDuration, num } from './format';
 import type { Target } from './target';
@@ -37,6 +39,8 @@ const GALAXY_KIND: Record<GalaxyKind, string> = {
 
 export function describe(t: Target): string {
   if (t.kind === 'galaxy') return GALAXY_KIND[t.galaxy.kind];
+  if (t.kind === 'blackhole') return blackHoleKind(t.bh);
+  if (t.kind === 'nebula') return t.nebula.type;
   if (t.kind === 'star') {
     const s = t.star;
     const m = /^([A-Z]+\d*)(.*)$/.exec(s.cls);
@@ -53,6 +57,8 @@ export function describe(t: Target): string {
 /** Shorter label for lists: "Planet", "Moon", "Star". */
 export function kindLabel(t: Target): string {
   if (t.kind === 'galaxy') return GALAXY_KIND[t.galaxy.kind];
+  if (t.kind === 'blackhole') return blackHoleKind(t.bh);
+  if (t.kind === 'nebula') return NEBULA_KIND[t.nebula.kind];
   if (t.kind === 'star') return `${t.star.cls} star`;
   return t.body.parent ? `Moon of ${t.body.parent.name}` : `Planet of ${t.star.name}`;
 }
@@ -65,8 +71,55 @@ function atmosphere(b: BodyData): string {
   return `${word} (${num(d)} x Earth)`;
 }
 
+function blackHoleKind(bh: BlackHoleData): string {
+  if (bh.kind === 'stellar') return bh.companion ? 'Stellar-mass black hole in a binary' : 'Stellar-mass black hole';
+  return bh.disc && bh.disc.mdot > 0.01 ? 'Supermassive black hole (quasar)' : 'Supermassive black hole';
+}
+
+function blackHoleProperties(bh: BlackHoleData): [string, string][] {
+  const mass = bh.mass >= 1e6 ? `${num(bh.mass / 1e6)} million M☉` : `${num(bh.mass)} M☉`;
+  const rows: [string, string][] = [
+    ['Mass', bh.mass >= 1e9 ? `${num(bh.mass / 1e9)} billion M☉` : mass],
+    ['Schwarzschild radius', formatDistance(bh.rs)],
+    ['Photon sphere', formatDistance(bh.rs * 1.5)],
+    ['Spin (a*)', bh.spin === null ? 'Unmeasured' : num(bh.spin)],
+    ['Accretion', bh.state],
+  ];
+  if (bh.disc) {
+    rows.push(['Disc', `${num(bh.disc.rIn)}–${num(bh.disc.rOut)} r_s, peak ${Math.round(bh.disc.tMax).toLocaleString('en-US')} K`]);
+    rows.push(['Accretion rate', `${num(bh.disc.mdot)} × Eddington`]);
+  }
+  if (bh.jet) rows.push(['Jet', `${formatDistance(bh.jet.length * bh.rs)}, Lorentz factor ${num(bh.jet.gamma)}`]);
+  if (bh.companion) rows.push(['Companion', `${bh.companion.name} (${bh.companion.cls}, ${num(bh.companion.mass)} M☉)`]);
+  if (bh.orbit) rows.push(['Orbital period', formatDuration(bh.orbit.period)], ['Separation', formatDistance(bh.orbit.a)]);
+  if (bh.galaxy && bh.kind === 'supermassive') rows.push(['Host galaxy', bh.galaxy.name]);
+  rows.push(['From Sol', formatDistance(Math.hypot(bh.x - SOL.x, bh.y - SOL.y, bh.z - SOL.z) * KM_PER_LY)]);
+  return rows;
+}
+
+const NEBULA_KIND: Record<NebulaData['kind'], string> = {
+  emission: 'Emission nebula', planetary: 'Planetary nebula', remnant: 'Supernova remnant', reflection: 'Reflection nebula', dark: 'Dark nebula',
+};
+
+function nebulaProperties(n: NebulaData): [string, string][] {
+  const rows: [string, string][] = [
+    ['Type', n.type],
+    ['Diameter', formatDistance(2 * n.radius * KM_PER_LY)],
+    ['From Sol', formatDistance(n.dist * KM_PER_LY)],
+    ['Galactic l, b', `${num(n.l)}°, ${num(n.b)}°`],
+  ];
+  // The star whose light it shines by (the first listed is the main one).
+  const main = n.stars[0];
+  if (main) rows.push([n.kind === 'planetary' || n.kind === 'remnant' ? 'Central star' : 'Lit by', `${main.name} (${main.cls})`]);
+  if (n.aliases.length) rows.push(['Also', n.aliases.slice(0, 3).join(', ')]);
+  rows.push(['About', n.note]);
+  return rows;
+}
+
 /** Label / value pairs for the info panel. Distance is live and added by the HUD. */
 export function properties(t: Target): [string, string][] {
+  if (t.kind === 'blackhole') return blackHoleProperties(t.bh);
+  if (t.kind === 'nebula') return nebulaProperties(t.nebula);
   if (t.kind === 'galaxy') {
     const g = t.galaxy;
     const fromHome = Math.hypot(g.x - MILKY_WAY.x, g.y - MILKY_WAY.y, g.z - MILKY_WAY.z) * KM_PER_LY;
@@ -138,6 +191,15 @@ const srgb = (c: Rgb, gain = 1) =>
 
 /** A small shaded-sphere swatch for lists and the system browser. */
 export function swatch(t: Target): string {
+  if (t.kind === 'blackhole') {
+    return t.bh.disc
+      ? 'radial-gradient(circle at 50% 50%, #000 0%, #000 30%, #ffd9a0 38%, #e07a30 50%, rgba(120,40,10,0.5) 64%, rgba(0,0,0,0) 74%)'
+      : 'radial-gradient(circle at 50% 50%, #000 0%, #000 34%, rgba(200,210,255,0.55) 40%, rgba(0,0,0,0) 58%)';
+  }
+  if (t.kind === 'nebula') {
+    const c = t.nebula.kind === 'planetary' ? '#4fd8c0' : t.nebula.kind === 'reflection' ? '#7ea6ff' : t.nebula.kind === 'remnant' ? '#e8a080' : '#e0507a';
+    return `radial-gradient(circle at 46% 52%, #ffe8f0 0%, ${c} 22%, rgba(120,30,60,0.45) 52%, rgba(40,10,30,0) 74%)`;
+  }
   if (t.kind === 'galaxy') {
     return 'radial-gradient(circle at 50% 50%, #fff6e0 0%, #d8b98a 18%, rgba(140,150,190,0.55) 50%, rgba(40,50,80,0) 72%)';
   }
