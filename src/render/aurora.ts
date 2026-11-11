@@ -3,6 +3,20 @@ import type { BodyData } from '../universe/bodies';
 import { atmoCommon } from './atmosphereScatter';
 import { WORLD_VERT } from './atmosphereShader';
 import { LOGDEPTH_FRAG, LOGDEPTH_FRAG_PARS, NOISE } from './glsl';
+import { HALF_LAYER, halfLayer } from './pipeline';
+
+// Down in the air the aurora fills the sky and every pixel marches a long way through it: then it is
+// marched at half resolution (pipeline.ts, HALF_LAYER) and drawn from there by this copy of the shell,
+// depth-tested at full resolution so the ground in front still cuts it sharply.
+const COMPOSITE_FRAG = /* glsl */ `
+${LOGDEPTH_FRAG_PARS}
+uniform sampler2D uHalf;
+uniform vec2 uInvFull;
+void main() {
+  gl_FragColor = vec4(texture2D(uHalf, gl_FragCoord.xy * uInvFull).rgb, 1.0);
+  ${LOGDEPTH_FRAG}
+}
+`;
 
 // Polar lights: thin curtains hanging along the auroral ovals, a ring around each magnetic
 // pole that is pushed towards the night side. The glow is green where the curtains bottom
@@ -172,6 +186,7 @@ const camDir = new THREE.Vector3();
 export class Aurora {
   readonly mesh: THREE.Mesh;
   private readonly material: THREE.ShaderMaterial;
+  private readonly composite: THREE.Mesh;
   private readonly top: number;
   /** The magnetic axis in the frame that turns with the body. */
   private readonly pole: THREE.Vector3;
@@ -209,6 +224,13 @@ export class Aurora {
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.scale.setScalar(body.radius * this.top * 1.02);
     this.mesh.frustumCulled = false;
+    this.composite = new THREE.Mesh(geometry, new THREE.ShaderMaterial({
+      vertexShader: WORLD_VERT, fragmentShader: COMPOSITE_FRAG, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+      uniforms: { uHalf: { value: halfLayer.target.texture }, uInvFull: { value: halfLayer.invFull } },
+    }));
+    this.composite.frustumCulled = false;
+    this.composite.visible = false;
+    this.mesh.add(this.composite);
   }
 
   /**
@@ -239,6 +261,13 @@ export class Aurora {
     u.uStrength.value = on * (this.material.userData.strength as number);
     // The most samples a ray may take (each takes what it needs, see stepsFor).
     u.uSteps.value = Math.round(THREE.MathUtils.lerp(24, 64, low));
+    const half = low > 0.5;
+    this.mesh.layers.set(half ? HALF_LAYER : 0);
+    this.composite.visible = half;
+    if (half) halfLayer.wanted = true;
+    const cm = this.composite.material as THREE.ShaderMaterial;
+    cm.side = inside ? THREE.BackSide : THREE.FrontSide;
+    this.composite.renderOrder = inside ? 1.5 : 2.5;
     u.uCenter.value.copy(rel);
     u.uSunDir.value.copy(sunDir);
     u.uTime.value = realTime;
@@ -253,5 +282,6 @@ export class Aurora {
 
   dispose(): void {
     this.material.dispose();
+    (this.composite.material as THREE.Material).dispose();
   }
 }

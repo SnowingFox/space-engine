@@ -10,6 +10,18 @@ import { LensPass } from './lensPass';
 export const SOFT_LAYER = 1;
 /** Resolution of the soft layer relative to the main target; point sprites on it scale their sizes by this. */
 export const softLayer = { scale: 0.5 };
+/**
+ * Objects on this layer of the main scene are drawn at half resolution into halfLayer.target before the main
+ * pass, for glows marched per pixel (the aurora); their meshes in the main pass sample that target.
+ */
+export const HALF_LAYER = 2;
+export const halfLayer = {
+  target: new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false }),
+  /** 1 / the main target's size, in pixels: gl_FragCoord.xy * invFull is the target's uv. */
+  invFull: new THREE.Vector2(1, 1),
+  /** Whether anything on the layer is to be drawn this frame (set by its owners each frame). */
+  wanted: false,
+};
 /** Soft layer pixels per CSS pixel. */
 const SOFT_RES = 0.75;
 /** The most pixels the main target gets, whatever the window and display. */
@@ -222,6 +234,8 @@ export class Pipeline {
     this.composer.setPixelRatio(this.pixelRatio);
     this.composer.setSize(window.innerWidth, window.innerHeight);
     this.bgTarget.setSize(this.composer.renderTarget1.width, this.composer.renderTarget1.height);
+    halfLayer.target.setSize(Math.ceil(this.composer.renderTarget1.width / 2), Math.ceil(this.composer.renderTarget1.height / 2));
+    halfLayer.invFull.set(1 / this.composer.renderTarget1.width, 1 / this.composer.renderTarget1.height);
     // The soft layer is where a galaxy that fills the view is marched: when frames run long it gives way first.
     const soft = Math.min(this.pixelRatio, Math.max(SOFT_RES * this.resScale, 0.45));
     this.softTarget.setSize(Math.ceil(window.innerWidth * soft), Math.ceil(window.innerHeight * soft));
@@ -320,6 +334,16 @@ export class Pipeline {
     this.bgCamera.layers.set(0);
     this.dimMat.opacity = this.skyDim;
     this.dimMat.visible = this.skyDim > 0.002;
+    if (halfLayer.wanted) {
+      this.camera.layers.set(HALF_LAYER);
+      this.renderer.setRenderTarget(halfLayer.target);
+      this.renderer.setClearColor(0, 0);
+      this.renderer.clear(true, false, false);
+      this.renderer.render(this.scene, this.camera);
+      this.camera.layers.set(0);
+      this.renderer.setClearAlpha(1);
+      halfLayer.wanted = false;
+    }
     this.renderer.setRenderTarget(this.bgTarget);
     this.renderer.render(this.bgScene, this.bgCamera);
     // (The composer puts back whatever target was bound when it started.)
