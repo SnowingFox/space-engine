@@ -26,6 +26,17 @@ varying vec3 vWorld;
 
 const int STEPS = 20;
 
+// Spacing of the samples along the ray (planet radii). The curtains are far thinner than that when
+// marched from afar, so each is widened to the spacing (keeping its total light) and the fine rays
+// fade to their mean: the same curtains at every distance, only sharper close up.
+float gStep = 0.0;
+
+// A curtain of half-width w across the oval, at offset x, blurred to the sample spacing.
+float curtain(float x, float w) {
+  float s2 = w * w + 0.25 * gStep * gStep;
+  return w * inversesqrt(s2) * exp(-0.5 * x * x / s2);
+}
+
 // Light given off per unit length (planet radii) at p.
 vec3 glow(vec3 p) {
   float r = length(p);
@@ -48,12 +59,12 @@ vec3 glow(vec3 p) {
   float fold = vnoise(q * 5.5 - drift * 2.0) - 0.5;
   float a = off - 0.07 * wander - 0.014 * fold;
   float b = off + 0.045 + 0.06 * wander + 0.012 * fold;
-  float arcs = exp(-a * a * 2.2e4) + 0.6 * exp(-b * b * 3.0e4);
+  float arcs = curtain(a, 0.00477) + 0.6 * curtain(b, 0.00408);
   float veil = 0.07 * exp(-off * off * 300.0);
   if (arcs + veil < 0.004) return vec3(0.0);
   // Rays: brightness varies along a curtain, and each ray reaches its own height.
-  float ray = vnoise(dir * 260.0 + drift * 6.0);
-  float fine = vnoise(dir * 1100.0 - drift * 9.0);
+  float ray = mix(0.5, vnoise(dir * 260.0 + drift * 6.0), clamp(1.5 - gStep * 520.0, 0.0, 1.0));
+  float fine = mix(0.5, vnoise(dir * 1100.0 - drift * 9.0), clamp(1.5 - gStep * 2200.0, 0.0, 1.0));
   float lively = 0.25 + 1.5 * ray * ray * (0.5 + fine);
   float reach = 4.0 + 9.0 * fine;
   float low = smoothstep(0.0, 0.05, alt) * exp(-alt * reach);
@@ -82,10 +93,12 @@ void main() {
   vec3 col = vec3(0.0);
   if (a1 > t0) {
     float dt = (a1 - t0) / float(STEPS);
+    gStep = dt;
     for (int i = 0; i < STEPS; i++) col += glow(ro + rd * (t0 + (float(i) + jitter) * dt)) * dt;
   }
   if (t1 > b0) {
     float dt = (t1 - b0) / float(STEPS);
+    gStep = dt;
     for (int i = 0; i < STEPS; i++) col += glow(ro + rd * (b0 + (float(i) + jitter) * dt)) * dt;
   }
   col *= uStrength;
@@ -157,10 +170,15 @@ export class Aurora {
     // From far away the ovals are too thin to see; under a daytime sky they are drowned out,
     // and from the ground they only show within a few hundred kilometres of an oval.
     let on = 1 - THREE.MathUtils.smoothstep(dist, 8, 14);
-    if (inside) {
-      on *= 1 - THREE.MathUtils.smoothstep(camDir.dot(sunDir), -0.12, 0.05);
+    // Down in the air these fade in gradually with the descent (a switch at the shell would make the
+    // curtains pop out of sight): under a daylit sky they are drowned out, and from the ground they only
+    // rise over the horizon from high latitudes (ovals sit 20-25 degrees from the magnetic pole), not
+    // from the middle ones, where they would lie along it as a band.
+    const low = 1 - THREE.MathUtils.smoothstep(dist, 1 + (this.top - 1) * 0.3, this.top);
+    if (low > 0) {
       const colat = Math.acos(Math.min(Math.abs(camDir.dot(pole)), 1));
-      on *= 1 - THREE.MathUtils.smoothstep(colat, 0.75, 0.95);
+      const near = (1 - THREE.MathUtils.smoothstep(camDir.dot(sunDir), -0.12, 0.05)) * (1 - THREE.MathUtils.smoothstep(colat, 0.5, 0.68));
+      on *= 1 - low + low * near;
     }
     this.mesh.visible = on > 0.003;
     if (!this.mesh.visible) return;

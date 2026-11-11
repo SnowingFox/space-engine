@@ -2,10 +2,11 @@ import * as THREE from 'three';
 import { bodyOrientation, spinAngle, type BodyData, type PlanetType } from '../universe/bodies';
 import { ATMO_EXTINCT_FRAG, ATMO_FRAG, RING_FRAG, WORLD_VERT } from './atmosphereShader';
 import { Aurora, auroraStrength } from './aurora';
+import { eclipseUniforms, setEclipse, type BodyLight } from './lighting';
 import { BodyMaps, noMapUniforms } from './bodyMaps';
 import { PLANET_FRAG, PLANET_VERT } from './planetShader';
 import { CLOUD_BAKE_FRAG, CLOUD_FRAG, PLANET_FRAG_MAIN, PROBE_FRAG, RING_MAP_FRAG } from './planetShaderMain';
-import { bake, makeProbeMaterial, probe } from './probe';
+import { AsyncProbe, bake, makeProbeMaterial, probe } from './probe';
 import { Terrain, fineCoord } from './terrain';
 import { TerrainShadow } from './terrainShadow';
 
@@ -35,6 +36,11 @@ let blankMap: THREE.Texture | null = null;
 const qInv = new THREE.Quaternion();
 const AXIS = new THREE.Vector3(0, 1, 0);
 const fwd = new THREE.Vector3();
+let spinFrame = 0;
+// World-space vectors into the planet's turning frame, its ring frame, or left as they are (qInv: the body's tilt, undone).
+const toPlanet = (v: THREE.Vector3): THREE.Vector3 => v.applyQuaternion(qInv).applyAxisAngle(AXIS, -spinFrame);
+const toRing = (v: THREE.Vector3): THREE.Vector3 => v.applyQuaternion(qInv);
+const toWorld = (v: THREE.Vector3): THREE.Vector3 => v;
 
 /** Meshes for one planet or moon. Positioned camera-relative every frame. */
 export class PlanetView {
@@ -62,8 +68,24 @@ export class PlanetView {
   /** Real maps (Solar System bodies), loaded while the body is near. */
   private readonly maps: BodyMaps | null;
   private groundReady = false;
+  /** This body's share of the star's light (the star's colour, scaled for distance). */
+  private readonly sunLight = new THREE.Color(1, 1, 1);
+  /** Reads the ground height without stalling the frame; the answer comes a frame or two later. */
+  private readonly asyncProbe: AsyncProbe | null = null;
+  /** The last answer: height (radii above the datum), where it was asked (unit vector), whether the real heights were in. */
+  private probed: { height: number; dir: THREE.Vector3; maps: boolean } | null = null;
+  private readonly asking = new THREE.Vector3();
+  private askingMaps = false;
+  private readonly answered = (v: number): void => {
+    // (Dropped if the camera has left the body meanwhile.)
+    if (!this.probed) return;
+    this.probed.height = v * 2 * this.heightScale;
+    this.probed.dir.copy(this.asking);
+    this.probed.maps = this.askingMaps;
+  };
 
-  constructor(readonly body: BodyData, sunColor: THREE.Color) {
+  constructor(readonly body: BodyData, starColor: THREE.Color) {
+    const sunColor = this.sunLight.copy(starColor);
     geoHi ??= cubeSphere(96);
     geoLo ??= cubeSphere(24);
     blankMap ??= new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
@@ -107,6 +129,11 @@ export class PlanetView {
       uRing: { value: new THREE.Vector4(ring?.inner ?? 0, ring?.outer ?? 1, ring?.seed ?? 0, ring ? 1 : 0) },
       uRingNormal: { value: new THREE.Vector3(0, 1, 0) },
       uHeightScale: { value: this.heightScale },
+      ...eclipseUniforms(),
+      // What lights the night side: the brightest neighbour, and the sunlit face of the rings.
+      uShineDir: { value: new THREE.Vector3(0, 1, 0) },
+      uShine: { value: new THREE.Color(0, 0, 0) },
+      uRingShine: { value: new THREE.Color(0, 0, 0) },
     };
     this.maps = BodyMaps.for(body);
     Object.assign(this.uniforms, this.maps?.uniforms ?? noMapUniforms());
@@ -132,6 +159,7 @@ export class PlanetView {
         ...this.uniforms, uProbeDir: { value: new THREE.Vector3(0, 1, 0) }, uProbeFine: { value: new THREE.Vector3() },
       });
       this.materials.push(this.probeMat);
+      this.asyncProbe = new AsyncProbe();
     } else {
       const mat = new THREE.ShaderMaterial({
         vertexShader: PLANET_VERT, fragmentShader: PLANET_FRAG + PLANET_FRAG_MAIN, uniforms: this.uniforms,
@@ -175,6 +203,8 @@ export class PlanetView {
           uDensity: { value: a.density },
           // Oxygen glows at night; worlds without free oxygen stay dark.
           uAirglow: { value: body.type === 'terran' || body.type === 'ocean' ? 1 : 0 },
+          uGiant: { value: solid ? 0 : 1 },
+          ...eclipseUniforms(),
         },
       });
       this.materials.push(this.atmoMat);
@@ -226,6 +256,7 @@ export class PlanetView {
           uCamObj: { value: new THREE.Vector3() },
           uRingMap: this.uniforms.uRingMap,
           uRingMapOn: this.uniforms.uRingMapOn,
+          ...eclipseUniforms(),
         },
       });
       this.materials.push(this.ringMat);
@@ -253,8 +284,9 @@ export class PlanetView {
   /**
    * rel: planet centre relative to the camera (km). sunDir: world-space unit vector to the star.
    * forward / halfAngle: the camera's view direction and half its diagonal field of view.
+   * light: eclipses, planetshine and the star's strength here (see lighting.ts).
    */
-  update(rel: THREE.Vector3, sunDir: THREE.Vector3, simTime: number, realTime: number, forward: THREE.Vector3, halfAngle: number): void {
+  update(rel: THREE.Vector3, sunDir: THREE.Vector3, simTime: number, realTime: number, forward: THREE.Vector3, halfAngle: number, light?: BodyLight): void {
     const b = this.body;
     const dist = rel.length();
     this.ground = null;
@@ -279,6 +311,7 @@ export class PlanetView {
     u.uSunDir.value.copy(sunDir).applyQuaternion(qInv).applyAxisAngle(AXIS, -angle);
     cam.copy(rel).multiplyScalar(-1 / b.radius).applyQuaternion(qInv).applyAxisAngle(AXIS, -angle);
     u.uTime.value = realTime;
+    if (light) this.applyLight(light, rel, angle);
     if (b.clouds > 0 && this.terrain) {
       if (!this.cloudMap && !this.maps?.hasClouds) this.paintClouds();
       // The deck drifts east a little faster than the ground turns.
@@ -292,12 +325,33 @@ export class PlanetView {
       if (dist < b.radius * 2) {
         const dir = this.probeMat.uniforms.uProbeDir.value.copy(cam).normalize();
         this.probeMat.uniforms.uProbeFine.value.set(fineCoord(dir.x), fineCoord(dir.y), fineCoord(dir.z));
-        const v = probe(this.probeMat);
-        if (v !== null) {
-          height = v * 2 * this.heightScale;
+        // The last answer stands while it was asked close enough by: the speed limit near the ground
+        // scales with altitude, so a frame or two of lag is a short way compared with the height.
+        const last = this.probed;
+        const altKm = last ? (cam.length() - 1 - last.height) * b.radius : 0;
+        const fresh = last !== null && last.maps === mapsReady
+          && last.dir.distanceTo(dir) * b.radius < Math.max(0.05, 0.5 * altKm);
+        if (fresh) {
+          height = last.height;
+          if (!this.asyncProbe!.busy) {
+            this.asking.copy(dir);
+            this.askingMaps = mapsReady;
+            this.asyncProbe!.start(this.probeMat, this.answered);
+          }
+        } else {
+          // Just arrived (or the heights just changed): wait for the answer once, rather than guess.
+          const v = probe(this.probeMat);
+          if (v !== null) {
+            height = v * 2 * this.heightScale;
+            this.probed = { height, dir: dir.clone(), maps: mapsReady };
+          }
+        }
+        if (this.probed) {
           this.ground = b.radius * (1 + height);
           this.groundReady = mapsReady;
         }
+      } else {
+        this.probed = null;
       }
       fwd.copy(forward).applyQuaternion(qInv).applyAxisAngle(AXIS, -angle);
       this.terrain.update(cam, fwd, halfAngle, height, this.shadow?.reach ?? 0);
@@ -309,6 +363,19 @@ export class PlanetView {
       this.atmoMat.uniforms.uCenter.value.copy(rel);
       this.atmoMat.uniforms.uSunDir.value.copy(sunDir);
     }
+  }
+
+  private applyLight(light: BodyLight, rel: THREE.Vector3, angle: number): void {
+    const u = this.uniforms;
+    const r = this.body.radius;
+    this.sunLight.copy(light.sun);
+    spinFrame = angle;
+    setEclipse(u, light, rel, r, toPlanet);
+    toPlanet((u.uShineDir.value as THREE.Vector3).copy(light.shineDir));
+    (u.uShine.value as THREE.Color).copy(light.shine);
+    (u.uRingShine.value as THREE.Color).copy(light.ringShine);
+    if (this.atmoMat) setEclipse(this.atmoMat.uniforms, light, rel, r, toWorld);
+    if (this.ringMat) setEclipse(this.ringMat.uniforms, light, rel, r, toRing);
   }
 
   /** Terrain height above the datum (km) under a world-space direction from the centre; null for gas or before the probe is ready. */
@@ -345,6 +412,7 @@ export class PlanetView {
     this.cloudMap?.dispose();
     this.shadow?.dispose();
     this.aurora?.dispose();
+    this.asyncProbe?.dispose();
     for (const m of this.materials) m.dispose();
     this.terrain?.dispose();
   }

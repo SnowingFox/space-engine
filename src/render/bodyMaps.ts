@@ -108,6 +108,101 @@ async function fetchBitmap(file: string, width?: number): Promise<ImageBitmap> {
   return createImageBitmap(blob, options);
 }
 
+// Uploading a big map in one go stalls the frame it lands in: an 8k bitmap takes a quarter of a
+// second inside texSubImage2D. Big maps are copied in bands instead, through a 2D canvas
+// (bit-exact for these opaque images), and shown once complete. Copies run at about 0.6 GB/s
+// in the GPU process and queue up behind each other, so the budget is in bytes per frame.
+
+/** Bitmaps at least this wide go up in bands. */
+const STAGE_WIDTH = 2048;
+/** Bytes uploaded per frame: 4 MB, a band of 128 rows of an 8k map. */
+const STAGE_BYTES = 4 << 20;
+
+interface Staging { run: (bytes: number) => number; cancelled: boolean; done: boolean }
+const stages: Staging[] = [];
+let pumping = false;
+
+function pump(): void {
+  let budget = STAGE_BYTES;
+  while (stages.length && budget > 0) {
+    const s = stages[0];
+    if (!s.cancelled) budget -= s.run(budget);
+    if (s.cancelled || s.done) stages.shift();
+  }
+  pumping = stages.length > 0;
+  if (pumping) requestAnimationFrame(pump);
+}
+
+/** A GL texture filled from the bitmap over the coming frames; resolves once all of it is in. */
+function stageTexture(bitmap: ImageBitmap, srgb: boolean, mipmaps: boolean, filter: number, wrapS: number): { done: Promise<THREE.ExternalTexture>; cancel: () => void } {
+  const renderer = probeRenderer()!;
+  const gl = renderer.getContext() as WebGL2RenderingContext;
+  const state = renderer.state;
+  const w = bitmap.width, h = bitmap.height;
+  const tex = gl.createTexture()!;
+  const levels = mipmaps ? Math.floor(Math.log2(Math.max(w, h))) + 1 : 1;
+  const bind = (): void => {
+    state.activeTexture(gl.TEXTURE0);
+    state.bindTexture(gl.TEXTURE_2D, tex);
+  };
+  bind();
+  gl.texStorage2D(gl.TEXTURE_2D, levels, srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+  if (aniso && mipmaps) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, renderer.capabilities.getMaxAnisotropy()));
+  let y = 0;
+  const canvas = new OffscreenCanvas(w, 512);
+  const cx = canvas.getContext('2d', { willReadFrequently: true })!;
+  let resolve: (t: THREE.ExternalTexture) => void = () => {};
+  let reject: (e: Error) => void = () => {};
+  const done = new Promise<THREE.ExternalTexture>((res, rej) => { resolve = res; reject = rej; });
+  let finished = false;
+  const job: Staging = {
+    cancelled: false,
+    done: false,
+    run: (bytes) => {
+      const n = Math.min(Math.max(Math.floor(bytes / (w * 4)), 8), 512, h - y);
+      cx.clearRect(0, 0, w, n);
+      cx.drawImage(bitmap, 0, y, w, n, 0, 0, w, n);
+      const px = cx.getImageData(0, 0, w, n).data;
+      bind();
+      state.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      state.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      state.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y, w, n, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      y += n;
+      if (y < h) return n * w * 4;
+      job.done = true;
+      if (mipmaps) gl.generateMipmap(gl.TEXTURE_2D);
+      bitmap.close();
+      const ext = new THREE.ExternalTexture(tex);
+      ext.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      ext.addEventListener('dispose', () => gl.deleteTexture(tex));
+      finished = true;
+      resolve(ext);
+      return n * w * 4;
+    },
+  };
+  stages.push(job);
+  if (!pumping) {
+    pumping = true;
+    requestAnimationFrame(pump);
+  }
+  return {
+    done,
+    cancel: () => {
+      if (job.cancelled || finished) return;
+      job.cancelled = true;
+      bitmap.close();
+      gl.deleteTexture(tex);
+      reject(new Error('cancelled'));
+    },
+  };
+}
+
 function colourTexture(bitmap: ImageBitmap, srgb = true): THREE.Texture {
   const t = new THREE.Texture(bitmap);
   t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
@@ -126,25 +221,32 @@ function colourTexture(bitmap: ImageBitmap, srgb = true): THREE.Texture {
 }
 
 /** Runs a one-pass conversion of a source image into a new single-channel render target. */
-function convert(bitmap: ImageBitmap, frag: string, type: THREE.TextureDataType, extra: Record<string, THREE.IUniform>): THREE.WebGLRenderTarget | null {
-  const src = new THREE.Texture(bitmap);
-  src.colorSpace = THREE.NoColorSpace;
-  src.flipY = false;
-  src.premultiplyAlpha = false;
-  src.generateMipmaps = false;
-  src.minFilter = src.magFilter = type === THREE.HalfFloatType ? THREE.NearestFilter : THREE.LinearFilter;
-  src.needsUpdate = true;
-  const target = new THREE.WebGLRenderTarget(bitmap.width, bitmap.height, {
+function convert(source: ImageBitmap | THREE.Texture, frag: string, type: THREE.TextureDataType, extra: Record<string, THREE.IUniform>): THREE.WebGLRenderTarget | null {
+  const bitmap = source instanceof THREE.Texture ? null : source;
+  const { width, height } = sizeOf(source);
+  let src: THREE.Texture;
+  if (bitmap) {
+    src = new THREE.Texture(bitmap);
+    src.colorSpace = THREE.NoColorSpace;
+    src.flipY = false;
+    src.premultiplyAlpha = false;
+    src.generateMipmaps = false;
+    src.minFilter = src.magFilter = sourceFilter(type);
+    src.needsUpdate = true;
+  } else {
+    src = source as THREE.Texture;
+  }
+  const target = new THREE.WebGLRenderTarget(width, height, {
     format: THREE.RedFormat, type, depthBuffer: false, generateMipmaps: true,
     minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
     wrapS: THREE.RepeatWrapping, wrapT: THREE.ClampToEdgeWrapping,
   });
   target.texture.anisotropy = Math.min(8, probeRenderer()?.capabilities.getMaxAnisotropy() ?? 1);
-  const mat = makeProbeMaterial(frag, { uSrc: { value: src }, uBakeSize: { value: new THREE.Vector2(bitmap.width, bitmap.height) }, ...extra });
+  const mat = makeProbeMaterial(frag, { uSrc: { value: src }, uBakeSize: { value: new THREE.Vector2(width, height) }, ...extra });
   const ok = bake(mat, target);
   mat.dispose();
   src.dispose();
-  bitmap.close();
+  bitmap?.close();
   if (!ok) {
     target.dispose();
     return null;
@@ -153,6 +255,17 @@ function convert(bitmap: ImageBitmap, frag: string, type: THREE.TextureDataType,
 }
 
 type Slot = 'color' | 'night' | 'clouds' | 'height' | 'ring' | 'cloudTint';
+
+/** Sampling of a source image the conversion passes read: exact texels for heights. */
+function sourceFilter(type: THREE.TextureDataType): THREE.MagnificationTextureFilter {
+  return type === THREE.HalfFloatType ? THREE.NearestFilter : THREE.LinearFilter;
+}
+
+function sizeOf(source: ImageBitmap | THREE.Texture): { width: number; height: number } {
+  return source instanceof THREE.Texture ? (source.userData as { width: number; height: number }) : source;
+}
+
+const isColour = (slot: Slot): boolean => slot === 'color' || slot === 'night' || slot === 'cloudTint';
 
 interface Loaded { tier: number; dispose: () => void }
 
@@ -173,6 +286,7 @@ export class BodyMaps {
   private tier = 0;
   private readonly held = new Map<Slot, Loaded>();
   private readonly pending = new Map<Slot, number>();
+  private readonly staging = new Map<Slot, () => void>();
   private disposed = false;
   private heightFailed = false;
 
@@ -243,15 +357,41 @@ export class BodyMaps {
   private request(slot: Slot, file: string, width: number | undefined, tierOf = this.tier): void {
     if (this.held.get(slot)?.tier === tierOf || this.pending.get(slot) === tierOf) return;
     this.pending.set(slot, tierOf);
+    // A band-by-band upload of the other size is no longer wanted.
+    this.staging.get(slot)?.();
+    this.staging.delete(slot);
     fetchBitmap(file, width).then((bitmap) => {
       const stillWanted = !this.disposed && this.tier > 0 && this.pending.get(slot) === tierOf
         && (tierOf === this.tier || slot === 'height' || slot === 'ring');
-      this.pending.delete(slot);
       if (!stillWanted) {
+        if (this.pending.get(slot) === tierOf) this.pending.delete(slot);
         bitmap.close();
         return;
       }
-      this.install(slot, bitmap, tierOf);
+      // (The ring map has transparency, which a 2D canvas would not hand back exactly.)
+      if (bitmap.width < STAGE_WIDTH || slot === 'ring' || !probeRenderer()) {
+        this.pending.delete(slot);
+        this.install(slot, bitmap, tierOf);
+        return;
+      }
+      const { width, height } = bitmap;
+      const filter = isColour(slot) ? WebGL2RenderingContext.LINEAR
+        : sourceFilter(slot === 'height' ? THREE.HalfFloatType : THREE.UnsignedByteType) === THREE.NearestFilter ? WebGL2RenderingContext.NEAREST : WebGL2RenderingContext.LINEAR;
+      const job = stageTexture(bitmap, isColour(slot), isColour(slot), filter,
+        isColour(slot) ? WebGL2RenderingContext.REPEAT : WebGL2RenderingContext.CLAMP_TO_EDGE);
+      this.staging.set(slot, job.cancel);
+      job.done.then((tex) => {
+        if (this.staging.get(slot) === job.cancel) this.staging.delete(slot);
+        const wanted = !this.disposed && this.tier > 0 && this.pending.get(slot) === tierOf
+          && (tierOf === this.tier || slot === 'height');
+        if (this.pending.get(slot) === tierOf) this.pending.delete(slot);
+        if (!wanted) {
+          tex.dispose();
+          return;
+        }
+        tex.userData = { width, height };
+        this.install(slot, tex, tierOf);
+      }, () => { /* cancelled: a newer request owns the slot */ });
     }, (err) => {
       this.pending.delete(slot);
       if (slot === 'height') this.heightFailed = true;
@@ -259,14 +399,15 @@ export class BodyMaps {
     });
   }
 
-  private install(slot: Slot, bitmap: ImageBitmap, tier: number): void {
+  /** source: the decoded image, or the same already on the GPU (big maps, see stageTexture). */
+  private install(slot: Slot, source: ImageBitmap | THREE.Texture, tier: number): void {
     const u = this.uniforms;
     const info = u.uMapInfo.value as THREE.Vector4;
-    const w = bitmap.width, h = bitmap.height;
+    const { width: w, height: h } = sizeOf(source);
     let loaded: Loaded;
     if (slot === 'height') {
       const hs = this.spec.height!;
-      const target = convert(bitmap, HEIGHT_DECODE_FRAG, THREE.HalfFloatType, {
+      const target = convert(source, HEIGHT_DECODE_FRAG, THREE.HalfFloatType, {
         uRange: { value: new THREE.Vector2(hs.min / 1000, hs.max / 1000) },
       });
       if (!target) return;
@@ -282,17 +423,18 @@ export class BodyMaps {
       } };
       mapStats.bytes += bytes;
     } else if (slot === 'clouds') {
-      const target = convert(bitmap, CLOUD_DECODE_FRAG, THREE.UnsignedByteType, {});
+      const target = convert(source, CLOUD_DECODE_FRAG, THREE.UnsignedByteType, {});
       if (!target) return;
       this.onClouds?.(target.texture);
       const bytes = w * h * 4 / 3;
       loaded = { tier, dispose: () => { target.dispose(); mapStats.bytes -= bytes; } };
       mapStats.bytes += bytes;
     } else {
-      const tex = colourTexture(bitmap);
+      const bitmap = source instanceof THREE.Texture ? null : source;
+      const tex = bitmap ? colourTexture(bitmap) : (source as THREE.Texture);
       const bytes = w * h * 4 * 4 / 3;
       mapStats.bytes += bytes;
-      const off = (): void => { tex.dispose(); bitmap.close(); mapStats.bytes -= bytes; };
+      const off = (): void => { tex.dispose(); bitmap?.close(); mapStats.bytes -= bytes; };
       if (slot === 'color') {
         u.uColorMap.value = tex;
         info.x = 1;
@@ -325,6 +467,8 @@ export class BodyMaps {
     if (this.held.has('clouds')) this.onClouds?.(null);
     this.held.clear();
     this.pending.clear();
+    for (const cancel of this.staging.values()) cancel();
+    this.staging.clear();
   }
 
   dispose(): void {

@@ -58,7 +58,9 @@ void atmoMedium(float top, vec3 color, float density, out float hGas, out float 
 
 // Light scattered towards the camera along ro + rd * [0, tEnd], for a unit-colour sun.
 // 'od' receives the optical depth of that stretch (extinction of what lies behind it).
-vec3 atmoScatter(vec3 ro, vec3 rd, float tEnd, vec3 sunDir, float top, vec3 color, float density, out vec3 od) {
+// 'most': steps at most (up to ATMO_VIEW_STEPS). 'adapt': fewer on a short stretch that stays at about
+// one height (the air in front of nearby ground), where the integrand barely changes.
+vec3 atmoScatterSteps(vec3 ro, vec3 rd, float tEnd, vec3 sunDir, float top, vec3 color, float density, int most, bool adapt, out vec3 od) {
   od = vec3(0.0);
   vec2 ta = raySphere(ro, rd, top);
   if (ta.x > ta.y || ta.y < 0.0) return vec3(0.0);
@@ -72,10 +74,18 @@ vec3 atmoScatter(vec3 ro, vec3 rd, float tEnd, vec3 sunDir, float top, vec3 colo
   // Haze takes a little more light than it scatters on.
   float hazeOut = haze * 1.1;
 
-  float dt = (t1 - t0) / float(ATMO_VIEW_STEPS);
+  int steps = min(most, ATMO_VIEW_STEPS);
+  if (adapt) {
+    // A step at most 0.4 gas scale heights long and half a haze scale height deep.
+    float rise = abs(length(ro + rd * t1) - length(ro + rd * t0));
+    float need = max((t1 - t0) / (0.4 * hGas), rise / (0.5 * hHaze));
+    steps = int(clamp(ceil(need), 2.0, float(steps)));
+  }
+  float dt = (t1 - t0) / float(steps);
   float lift = 2.5 * hGas;
   vec3 sumGas = vec3(0.0), sumHaze = vec3(0.0), sumSky = vec3(0.0);
   for (int i = 0; i < ATMO_VIEW_STEPS; i++) {
+    if (i >= steps) break;
     vec3 p = ro + rd * (t0 + (float(i) + 0.5) * dt);
     float r = length(p);
     float h = max(r - 1.0, 0.0);
@@ -108,6 +118,10 @@ vec3 atmoScatter(vec3 ro, vec3 rd, float tEnd, vec3 sunDir, float top, vec3 colo
   float g = 0.76;
   float phaseM = 0.0796 * (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5);
   return 7.0 * ((sumGas * phaseR + sumSky * 0.12) * gas + sumHaze * (haze * phaseM));
+}
+
+vec3 atmoScatter(vec3 ro, vec3 rd, float tEnd, vec3 sunDir, float top, vec3 color, float density, out vec3 od) {
+  return atmoScatterSteps(ro, rd, tEnd, sunDir, top, color, density, ATMO_VIEW_STEPS, false, od);
 }
 
 // Colour of direct sunlight after crossing the atmosphere down to p: white at noon, red at dusk.

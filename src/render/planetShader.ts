@@ -1,5 +1,6 @@
 import { atmoCommon } from './atmosphereScatter';
 import { LOGDEPTH_FRAG_PARS, LOGDEPTH_VERT, LOGDEPTH_VERT_PARS, NOISE } from './glsl';
+import { ECLIPSE } from './lighting';
 import { SHADOW_LOOKUP, SHADOW_PROJECT } from './terrainShadow';
 
 export const RING_DENSITY = /* glsl */ `
@@ -32,12 +33,14 @@ varying vec3 vView;
 varying vec3 vFine;
 varying float vSkirt;
 varying float vMapKm;
+varying vec4 vGrad;
 void main() {
   vObj = position;
   vView = position - uCamObj;
   vFine = vec3(0.0);
   vSkirt = 0.0;
   vMapKm = 0.0;
+  vGrad = vec4(0.0);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   ${LOGDEPTH_VERT}
 }
@@ -327,6 +330,10 @@ varying vec3 vView;
 varying vec3 vFine;
 varying float vSkirt;
 varying float vMapKm;
+varying vec4 vGrad;
+// Patches this fine (vertices per planet radius) also carry the terrain's slope per vertex, for the
+// pixels too close for the per-pixel slope (see the fragment shader).
+const float GRAD_DETAIL = 2e4;
 void main() {
   vec3 d = position.x * uCubeU + position.y * uCubeV;
   float l0 = length(uCubeCenter);
@@ -338,6 +345,19 @@ void main() {
   vec3 fp = uFineOrigin + off * FINE_FREQ;
   float rough;
   float height = terrain(n, uPatchDetail, rough);
+  vGrad = vec4(0.0);
+#ifndef SHADOW
+  if (uPatchDetail > GRAD_DETAIL) {
+    // Two vertex spacings apart, and at least 2e-6 radii: far enough that float32 rounding of the
+    // direction (6e-8) does not matter.
+    float e = max(2.0 / uPatchDetail, 2e-6);
+    vec3 tu = normalize(uCubeU - n * dot(uCubeU, n)), tv = normalize(uCubeV - n * dot(uCubeV, n));
+    float r2;
+    float hu = terrain(normalize(n + tu * e), uPatchDetail, r2);
+    float hv = terrain(normalize(n + tv * e), uPatchDetail, r2);
+    vGrad = vec4(((hu - height) * tu + (hv - height) * tv) / e, 1.0);
+  }
+#endif
   float h = displacement(height + fineRelief(fp, uPatchDetail, rough)) - position.z * uSkirt;
   vObj = n;
   vMapKm = gMapKm;
@@ -422,12 +442,17 @@ ${PLANET_COMMON}
 ${RING_DENSITY}
 ${SURFACE_MAPS}
 ${atmoCommon(8)}
+${ECLIPSE}
 uniform float uAtmoTop;     // planet radii
+uniform vec3 uShineDir;     // towards the neighbour that lights the night side (object space)
+uniform vec3 uShine;        // the light it throws here
+uniform vec3 uRingShine;    // light off the sunlit face of the rings, with the star overhead them
 varying vec3 vObj;
 varying vec3 vView;         // camera to surface, planet radii
 varying vec3 vFine;
 varying float vSkirt;       // above zero on the curtain that hangs under a patch's edge
 varying float vMapKm;       // the real map's height, interpolated between the vertices
+varying vec4 vGrad;         // the terrain's slope from the vertices (w = 1 where there is one)
 uniform sampler2D uRingMap; // real ring colour and opacity, inner edge to outer
 uniform float uRingMapOn;
 ${SHADOW_LOOKUP}

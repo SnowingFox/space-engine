@@ -3,6 +3,8 @@ import { KM_PER_AU, SUN_RADIUS_KM } from '../core/units';
 import { temperatureToRgb, type StarData } from '../universe/stars';
 import { LOGDEPTH_FRAG, LOGDEPTH_FRAG_PARS, LOGDEPTH_VERT, LOGDEPTH_VERT_PARS, NOISE } from './glsl';
 import { PLANET_VERT } from './planetShader';
+import { lightSwitches } from './lighting';
+import { probeRenderer } from './probe';
 
 const STAR_FRAG = /* glsl */ `
 ${LOGDEPTH_FRAG_PARS}
@@ -63,6 +65,7 @@ uniform vec2 uPart;    // how much of the core and rays, and of the aureole, thi
 uniform float uDisk;   // stellar disk radius as a fraction of the quad
 uniform float uStreak;
 uniform float uTime;
+uniform float uCorona; // 1 when another body exactly covers the star: its corona shows
 varying vec2 vUv;
 
 // Smooth noise around the circle with n lobes.
@@ -96,18 +99,108 @@ void main() {
   float off = max(r - uDisk, 0.0) / max(uDisk, 1e-4);
   float streamers = lobes(turn, 7.0, 11.0) * (0.5 + 0.5 * lobes(turn, 23.0, 5.0)) * (0.7 + 0.3 * lobes(turn, 90.0, 2.0));
   float chromosphere = 1.6 * exp(-off * 60.0);
-  float coronaGlow = (chromosphere + 0.45 * exp(-off * 7.0) + 0.5 * streamers * streamers / (1.0 + off * off * 9.0) * smoothstep(1.0, 0.3, r)) * (1.0 - uStreak);
+  float coronaGlow = (chromosphere + 0.45 * exp(-off * 7.0) + 0.5 * streamers * streamers / (1.0 + off * off * 9.0) * smoothstep(1.0, 0.3, r));
   vec3 spectrum = clamp(vec3(h * 1.6 - 0.3, 1.0 - abs(h * 2.0 - 1.0), 1.3 - h * 1.6), 0.0, 1.0);
   // The quad also covers the photosphere: keep the glare off the resolved disk.
   // (A disc too small to show any surface is all glare.)
   float fade = smoothstep(1.0, 0.5, r) * mix(smoothstep(uDisk * 0.97, uDisk * 1.02, r + 0.004), 1.0, uStreak);
   vec3 tint = mix(uColor, uColor * uColor, clamp(x * 6.0, 0.0, 1.0));
   vec3 col = mix(tint, vec3(1.0), clamp(core * 0.2, 0.0, 1.0)) * ((core + rays) * uPart.x + aureole * uPart.y) * uIntensity;
-  col += (spectrum * ring * uIntensity + uColor * mix(uColor * vec3(1.0, 0.8, 0.62), vec3(1.0), clamp(coronaGlow - 0.4, 0.0, 1.0)) * coronaGlow) * uPart.x;
-  gl_FragColor = vec4(col * uTint * fade, 1.0);
+  vec3 corona = uColor * mix(uColor * vec3(1.0, 0.8, 0.62), vec3(1.0), clamp(coronaGlow - 0.4, 0.0, 1.0)) * coronaGlow;
+  col += (spectrum * ring * uIntensity + corona * (1.0 - uStreak)) * uPart.x;
+  col *= uTint * fade;
+  // At totality the corona is all that is left of the star: pearly, with the pink chromosphere at the limb.
+  // (It is not dimmed by the starlight tint, which the covering body has taken to zero.)
+  // Its brightness falls off about as the cube of the distance from the Sun's centre, out to several radii.
+  float rim = smoothstep(uDisk * 0.97, uDisk * 1.03, r) * smoothstep(1.0, 0.5, r);
+  float rr = max(r / max(uDisk, 1e-4), 1.0);
+  float outer = 0.9 * pow(rr, -3.2) * (0.55 + 0.9 * streamers);
+  vec3 pearl = mix(uColor, vec3(0.92, 0.95, 1.0), 0.6);
+  col += (pearl * outer + corona * 0.25 + vec3(1.0, 0.3, 0.42) * chromosphere * 0.3) * uCorona * rim * uPart.x;
+  gl_FragColor = vec4(col, 1.0);
   ${LOGDEPTH_FRAG}
 }
 `;
+
+// Is the star's disc in sight? Small quads over the disc, pulled just in front of the star, are drawn
+// depth-tested with an occlusion query each; the share that passes says how much of the disc the
+// terrain and the bodies leave visible. The answer arrives a frame or two later.
+const PROBE_GRID = 4;
+const PROBE_VERT = /* glsl */ `
+${LOGDEPTH_VERT_PARS}
+uniform float uSize;
+uniform float uPull;
+uniform vec2 uCell;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+  mv.xyz *= uPull;
+  mv.xy += (uCell + position.xy * (0.5 / ${PROBE_GRID}.0)) * uSize * uPull;
+  gl_Position = projectionMatrix * mv;
+  ${LOGDEPTH_VERT}
+}
+`;
+const PROBE_FRAG = /* glsl */ `
+${LOGDEPTH_FRAG_PARS}
+void main() {
+  gl_FragColor = vec4(0.0);
+  ${LOGDEPTH_FRAG}
+}
+`;
+
+// Lens flare: ghosts of the aperture on the line from the star through the centre of the frame,
+// and the anamorphic streak across it. Placed in clip space, on top of everything.
+const FLARE_VERT = /* glsl */ `
+attribute vec4 aGhost;   // place along the line (1 = the star, -1 = mirrored through the centre), size, hue, kind
+uniform float uAspect;
+varying vec2 vUv;
+varying vec2 vGhost;
+varying float vKind;
+varying float vInFrame;
+void main() {
+  vec4 c = projectionMatrix * modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+  vec2 sun = c.xy / max(c.w, 1e-6);
+  vUv = position.xy;
+  vGhost = aGhost.zw;
+  vKind = aGhost.w;
+  // Only with the star itself in the frame.
+  vInFrame = 1.0 - smoothstep(0.85, 1.0, max(abs(sun.x), abs(sun.y)));
+  vec2 at = sun * aGhost.x;
+  vec2 size = aGhost.w > 1.5 ? vec2(0.9, 0.006) : vec2(aGhost.y / uAspect, aGhost.y);
+  // Behind the camera: nothing.
+  gl_Position = c.w > 0.0 ? vec4(at + position.xy * size, 0.0, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+const FLARE_FRAG = /* glsl */ `
+uniform vec3 uColor;
+uniform float uFlare;
+uniform float uStreakGain;
+varying vec2 vUv;
+varying vec2 vGhost;
+varying float vKind;
+varying float vInFrame;
+void main() {
+  float r = length(vUv);
+  vec3 col;
+  if (vKind > 1.5) {
+    // Anamorphic streak: a thin horizontal line, bluish, fading out along its length.
+    float a = exp(-abs(vUv.x) * 3.5) * exp(-vUv.y * vUv.y * 9.0);
+    col = mix(vec3(0.35, 0.55, 1.0), uColor, 0.35) * a * uStreakGain;
+  } else {
+    if (r > 1.0) discard;
+    // A soft disc with a brighter rim (kind 1: a ring only), its colour shifting with the glass.
+    float disc = vKind > 0.5 ? exp(-pow((r - 0.85) / 0.08, 2.0)) : smoothstep(1.0, 0.75, r) * (0.55 + 0.45 * smoothstep(0.5, 0.95, r));
+    float h = vGhost.x;
+    vec3 hue = clamp(vec3(1.5 - abs(h * 3.0 - 0.5), 1.5 - abs(h * 3.0 - 1.5), 1.5 - abs(h * 3.0 - 2.5)) - 0.5, 0.0, 1.0);
+    col = mix(uColor, hue, 0.35) * disc;
+  }
+  gl_FragColor = vec4(col * uFlare * vInFrame, 1.0);
+}
+`;
+// place, size (fraction of the frame height), hue, kind (0 disc, 1 ring, 2 streak)
+const GHOSTS: [number, number, number, number][] = [
+  [0.62, 0.02, 0.15, 0], [0.33, 0.035, 0.55, 0], [-0.18, 0.05, 0.3, 0], [-0.42, 0.03, 0.8, 0],
+  [-0.66, 0.07, 0.6, 1], [-0.95, 0.06, 0.05, 0], [-1.3, 0.1, 0.45, 1], [1.0, 1.0, 0.0, 2],
+];
 
 /** The anchor star: a shaded photosphere plus a camera-facing glare quad. */
 export class StarView {
@@ -121,6 +214,12 @@ export class StarView {
   // Glare forms in the eye, not in the sky: part of it spills over whatever stands next to the star.
   private readonly spillMat: THREE.ShaderMaterial;
   private readonly tint = new THREE.Vector3(1, 1, 1);
+  private readonly flareMat: THREE.ShaderMaterial;
+  private readonly probeMat: THREE.ShaderMaterial;
+  private readonly probes: { query: WebGLQuery | null; pending: boolean; passed: boolean }[] = [];
+  /** Share of the star's disc not hidden by anything solid (from the occlusion queries). */
+  private visible = 1;
+  private visibleNow = 1;
 
   constructor(readonly star: StarData) {
     const [r, g, b] = temperatureToRgb(star.temp);
@@ -147,7 +246,7 @@ export class StarView {
         blending: THREE.AdditiveBlending,
         uniforms: {
           uColor: { value: this.color }, uTint: { value: this.tint }, uSize: { value: 1 }, uIntensity: { value: 1 },
-          uPart: { value: new THREE.Vector2(1, 1) }, uDisk: { value: 0 }, uStreak: { value: 1 }, uTime: { value: 0 },
+          uPart: { value: new THREE.Vector2(1, 1) }, uDisk: { value: 0 }, uStreak: { value: 1 }, uTime: { value: 0 }, uCorona: { value: 0 },
         },
       });
       const mesh = new THREE.Mesh(quad, mat);
@@ -158,20 +257,95 @@ export class StarView {
     };
     this.glareMat = layer(true);
     this.spillMat = layer(false);
+
+    this.probeMat = new THREE.ShaderMaterial({
+      vertexShader: PROBE_VERT, fragmentShader: PROBE_FRAG, transparent: true, depthWrite: false, colorWrite: false,
+      uniforms: { uSize: { value: 1 }, uPull: { value: 1 }, uCell: { value: new THREE.Vector2() } },
+    });
+    for (let j = 0; j < PROBE_GRID; j++) {
+      for (let i = 0; i < PROBE_GRID; i++) {
+        const mat = this.probeMat.clone();
+        mat.uniforms.uSize = this.probeMat.uniforms.uSize;
+        mat.uniforms.uPull = this.probeMat.uniforms.uPull;
+        (mat.uniforms.uCell.value as THREE.Vector2).set((i + 0.5) / PROBE_GRID - 0.5, (j + 0.5) / PROBE_GRID - 0.5);
+        const mesh = new THREE.Mesh(quad, mat);
+        mesh.frustumCulled = false;
+        // After everything solid, and before the glare.
+        mesh.renderOrder = 2.9;
+        const probe = { query: null as WebGLQuery | null, pending: false, passed: true };
+        this.probes.push(probe);
+        mesh.onBeforeRender = (renderer) => {
+          const gl = renderer.getContext() as WebGL2RenderingContext;
+          if (probe.pending) return;
+          probe.query ??= gl.createQuery();
+          gl.beginQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE, probe.query);
+        };
+        mesh.onAfterRender = (renderer) => {
+          const gl = renderer.getContext() as WebGL2RenderingContext;
+          if (probe.pending || !probe.query) return;
+          gl.endQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE);
+          probe.pending = true;
+        };
+        this.group.add(mesh);
+      }
+    }
+
+    const flare = new THREE.BufferGeometry();
+    const pos: number[] = [], ghost: number[] = [], index: number[] = [];
+    GHOSTS.forEach((g, k) => {
+      for (const [x, y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        pos.push(x, y, 0);
+        ghost.push(...g);
+      }
+      index.push(k * 4, k * 4 + 1, k * 4 + 2, k * 4, k * 4 + 2, k * 4 + 3);
+    });
+    flare.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    flare.setAttribute('aGhost', new THREE.Float32BufferAttribute(ghost, 4));
+    flare.setIndex(index);
+    this.flareMat = new THREE.ShaderMaterial({
+      vertexShader: FLARE_VERT, fragmentShader: FLARE_FRAG, transparent: true, depthTest: false, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: { uColor: { value: this.color }, uFlare: { value: 0 }, uStreakGain: { value: 0 }, uAspect: { value: 1 } },
+    });
+    const flareMesh = new THREE.Mesh(flare, this.flareMat);
+    flareMesh.frustumCulled = false;
+    flareMesh.renderOrder = 10;
+    this.group.add(flareMesh);
+  }
+
+  /** Collects the occlusion answers that have come back; returns the share of the disc in sight. */
+  private readVisibility(gl: WebGL2RenderingContext): number {
+    let seen = 0, known = 0;
+    for (const p of this.probes) {
+      if (p.pending && p.query && gl.getQueryParameter(p.query, gl.QUERY_RESULT_AVAILABLE)) {
+        p.passed = !!gl.getQueryParameter(p.query, gl.QUERY_RESULT);
+        p.pending = false;
+      }
+      known++;
+      if (p.passed) seen++;
+    }
+    return known ? seen / known : 1;
   }
 
   /**
    * tint: what is left of each colour of the star's light on its way to the camera.
    * spill: how much of the aureole may show over things in front of the star, 0..1.
    */
-  update(rel: THREE.Vector3, realTime: number, tint: THREE.Vector3, spill: number): void {
+  update(rel: THREE.Vector3, realTime: number, tint: THREE.Vector3, spill: number, totality = 0): void {
     this.group.position.copy(rel);
-    this.tint.copy(tint);
+    // Mountains (or anything solid) over the disc put out the glare too, not just the disc.
+    const renderer = probeRenderer();
+    const gl = renderer?.getContext() as WebGL2RenderingContext | undefined;
+    if (gl) this.visibleNow = this.readVisibility(gl);
+    const canvas = renderer?.domElement;
+    const aspect = canvas && canvas.height > 0 ? canvas.width / canvas.height : 1;
+    this.visible += (this.visibleNow - this.visible) * 0.5;
+    this.tint.copy(tint).multiplyScalar(this.visible);
     const dist = Math.max(rel.length(), this.radiusKm * 1.0001);
     const dAu = dist / KM_PER_AU;
     const brightness = this.brightness = this.star.lum / (dAu * dAu);
     // Glare grows with apparent brightness but never shrinks below a visible point.
-    const angular = THREE.MathUtils.clamp(0.2 * Math.pow(brightness, 0.17), 0.012, 0.36);
+    const angular = THREE.MathUtils.clamp(0.2 * Math.pow(brightness, brightness > 1 ? 0.08 : 0.17), 0.012, 0.36);
     // Perspective makes the silhouette wider than the true radius once the camera is close.
     const ratio = Math.min(this.radiusKm / dist, 0.98);
     const apparent = this.radiusKm / Math.sqrt(1 - ratio * ratio);
@@ -179,7 +353,7 @@ export class StarView {
     // Once the disc is more than a dot the photosphere carries the light itself (and blooms);
     // glare on top of it would only wash out the view.
     const closeUp = THREE.MathUtils.smoothstep(ratio, 0.02, 0.2);
-    const intensity = THREE.MathUtils.clamp(Math.pow(brightness, 0.3), 0.3, 1.8) * (1 - 0.93 * closeUp);
+    const intensity = THREE.MathUtils.clamp(Math.pow(brightness, brightness > 1 ? 0.15 : 0.3), 0.3, 1.4) * (1 - 0.93 * closeUp);
     const over = 0.5 * spill * (1 - closeUp);
     for (const mat of [this.glareMat, this.spillMat]) {
       const g = mat.uniforms;
@@ -191,6 +365,18 @@ export class StarView {
     }
     (this.glareMat.uniforms.uPart.value as THREE.Vector2).set(1, 1 - over);
     (this.spillMat.uniforms.uPart.value as THREE.Vector2).set(0, over);
+    this.glareMat.uniforms.uCorona.value = lightSwitches.eclipses ? totality : 0;
+    this.spillMat.uniforms.uCorona.value = 0;
+    // The occlusion quads cover the disc (at least a few pixels), just in front of the star.
+    this.probeMat.uniforms.uSize.value = Math.max(apparent * 2, dist * 0.002);
+    this.probeMat.uniforms.uPull.value = Math.max(1 - (this.radiusKm * 1.5) / dist, 0.001);
+    // Flare: faint, and only from a star that is a dazzling point rather than a disc filling the view.
+    const lit = (tint.x * 0.3 + tint.y * 0.6 + tint.z * 0.1) * this.visible;
+    const f = this.flareMat.uniforms;
+    // A few hundredths of the glare at most: noticed, never in the way.
+    f.uFlare.value = lightSwitches.flare ? 0.01 * Math.min(intensity, 1.5) * lit * (1 - closeUp) : 0;
+    f.uStreakGain.value = 0.3;
+    f.uAspect.value = aspect;
     const s = this.surfaceMat.uniforms;
     s.uTime.value = realTime;
     // A distant disc is a dazzling point; close by, the eye adapts and the surface shows its texture.
@@ -202,6 +388,11 @@ export class StarView {
     this.surfaceMat.dispose();
     this.glareMat.dispose();
     this.spillMat.dispose();
+    this.flareMat.dispose();
+    this.probeMat.dispose();
+    const gl = probeRenderer()?.getContext() as WebGL2RenderingContext | undefined;
+    for (const p of this.probes) if (p.query) gl?.deleteQuery(p.query);
+    this.group.traverse((o) => { if ((o as THREE.Mesh).material && (o as THREE.Mesh).material !== this.probeMat && ((o as THREE.Mesh).material as THREE.ShaderMaterial).uniforms?.uCell) ((o as THREE.Mesh).material as THREE.Material).dispose(); });
     this.group.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
   }
 }
