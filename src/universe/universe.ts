@@ -34,6 +34,10 @@ export interface GalaxyData {
   /** 0: orderly, 1: ragged star clouds. */
   irregular: number;
   seed: number;
+  /** Elongation of the bulge into a bar (1: round); unset, 1.8 for barred spirals. */
+  bar?: number;
+  /** A giant star-forming region (its own frame): x, z, radius (ly), brightness relative to the disc. */
+  knot?: [number, number, number, number];
 }
 
 export const MILKY_WAY_RADIUS = 52000;
@@ -102,6 +106,18 @@ function fromSky(l: number, b: number, dist: number): [number, number, number] {
   return [SOL.x - dist * cb * Math.cos(l * DEG), SOL.y + dist * Math.sin(b * DEG), SOL.z - dist * cb * Math.sin(l * DEG)];
 }
 
+/** Axes for a galaxy at (l, b) on Sol's sky whose disc is seen `tilt` degrees from face-on from Sol. */
+function facing(l: number, b: number, tilt: number, spin: number): number[] {
+  const [x, y, z] = fromSky(l, b, 1);
+  const ux = x - SOL.x, uy = y - SOL.y, uz = z - SOL.z;
+  // Tipped about a horizontal line across the sight line.
+  let px = -uz, pz = ux;
+  const pl = Math.hypot(px, pz);
+  px /= pl; pz /= pl;
+  const c = Math.cos(tilt * DEG), s = Math.sin(tilt * DEG);
+  return axesFromNormal(-ux * c + px * s, -uy * c, -uz * c + pz * s, spin);
+}
+
 function build(): GalaxyData[] {
   const list: GalaxyData[] = [];
   const rng = new Rng(20260411);
@@ -114,8 +130,18 @@ function build(): GalaxyData[] {
     dust: 1, bulgeLum: 6.0e-4, discLum: 2.7e-4, blue: 0.8, irregular: 0.3, seed: 3.7,
   });
   // The Local Group and the famous neighbours, roughly where they are on Sol's sky.
-  add('Large Magellanic Cloud', 'irregular', fromSky(280.5, -32.9, 163e3), 9500);
-  add('Small Magellanic Cloud', 'irregular', fromSky(302.8, -44.3, 200e3), 5500);
+  // The Magellanic Clouds. The LMC: a disc seen ~35 deg from face-on with a bar and one ragged arm, some
+  // 10 deg across on Sol's sky, and 30 Doradus, the brightest star-forming region of the Local Group, at the
+  // bar's end (van der Marel & Kallivayalil 2014). The SMC: a lumpy elongated bar of young blue stars, ~5 x 3 deg.
+  // (The LMC's axes are set, but random ones are still drawn: every generated galaxy stays as it was.)
+  randomAxes(rng);
+  add('Large Magellanic Cloud', 'irregular', fromSky(280.5, -32.9, 163e3), 15000, facing(280.5, -32.9, 35, 2.4), {
+    arms: 1, pitchK: 2.2, armContrast: 0.35, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.35 / 750,
+    discScale: 7000, height: 650, irregular: 0.6, blue: 0.9, dust: 0.5, knot: [3200, 2400, 1700, 12],
+  });
+  add('Small Magellanic Cloud', 'irregular', fromSky(302.8, -44.3, 200e3), 9000, undefined, {
+    arms: 1, armContrast: 0.15, bar: 2.6, bulgeScale: 1000, bulgeFlat: 1.6, bulgeLum: 0.04 / 450, discScale: 2800, height: 900, irregular: 0.9, blue: 1, dust: 0.3,
+  });
   add('Andromeda (M31)', 'spiral', fromSky(121.2, -21.6, 2.54e6), 76000, undefined, { arms: 2, armContrast: 0.85, blue: 0.7 });
   add('Triangulum (M33)', 'spiral', fromSky(133.6, -31.3, 2.73e6), 30000, undefined, { arms: 3, armContrast: 0.5, blue: 1, irregular: 0.5 });
   add('NGC 6822', 'irregular', fromSky(25.3, -18.4, 1.6e6), 3500);
@@ -236,8 +262,8 @@ export function armStrengthOf(g: GalaxyData, x: number, z: number): number {
   return (1 - core) + core * (0.45 + (Math.min(1, major + minor) - 0.45) * g.armContrast);
 }
 
-/** Stellar density at a point in a galaxy's own frame, relative to the solar neighbourhood. */
-export function densityOf(g: GalaxyData, x: number, y: number, z: number): number {
+/** Stellar density at a point in a galaxy's own frame, relative to the solar neighbourhood (arms false: averaged over them). */
+export function densityOf(g: GalaxyData, x: number, y: number, z: number, arms = true): number {
   const r = Math.hypot(x, z);
   const ay = Math.abs(y);
   const rb = Math.hypot(r, y * g.bulgeFlat);
@@ -248,5 +274,5 @@ export function densityOf(g: GalaxyData, x: number, y: number, z: number): numbe
   const edge = 1 - smooth(g.radius * 0.8, g.radius * 1.1, r);
   const disc = 15.44 * (g.discLum / 2.7e-4) * Math.exp(-r / g.discScale) * edge;
   const vertical = 0.9 * Math.exp(-ay / (g.height * 0.46)) + 0.1 * Math.exp(-ay / (g.height * 1.85));
-  return disc * vertical * (0.22 + 1.25 * armStrengthOf(g, x, z)) + bulge;
+  return disc * vertical * (0.22 + 1.25 * (arms ? armStrengthOf(g, x, z) : 0.5)) + bulge;
 }

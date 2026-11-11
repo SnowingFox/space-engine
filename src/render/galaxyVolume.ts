@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import type { GalaxyData } from '../universe/universe';
-import { GALAXY_GLSL, galaxyNoise } from './galaxyShader';
+import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { probeRenderer } from './probe';
 
 /** How many galaxies the camera can be inside of (or close to) at once. */
@@ -13,7 +13,7 @@ export function galaxyParams(g: GalaxyData, brightness: number): [number[], numb
     [g.radius, g.discScale, g.height, g.bulgeScale],
     [g.arms, g.pitchK, g.armContrast, g.dust],
     [g.bulgeLum, g.discLum, g.blue, g.seed],
-    [g.bulgeFlat, g.irregular, brightness, g.kind === 'barred spiral' ? 1.8 : 1],
+    [g.bulgeFlat, g.irregular, brightness, g.bar ?? (g.kind === 'barred spiral' ? 1.8 : 1)],
   ];
 }
 
@@ -42,11 +42,19 @@ uniform float uPass;
 void main() {
   // Later passes also land anywhere inside their texel, so what is finer than a texel averages out smoothly.
   vec2 sub = uSettle > 0.5 && uPass > 0.5 ? vec2(marchJitter(gl_FragCoord.xy + uPass * 5.0), marchJitter(gl_FragCoord.yx + uPass * 11.0)) - 0.5 : vec2(0.0);
+#ifdef PANORAMA
+  // The whole sky in galactic longitude and latitude, as the survey maps are: centre in the middle, longitude to the left.
+  // (uFaceU: universe direction of l = 0; uFaceV: of l = 90 deg; uFaceF: north galactic pole.)
+  vec2 lb = vec2(0.5 - (gl_FragCoord.x + sub.x) / uSize, (gl_FragCoord.y + sub.y) / (0.5 * uSize) - 0.5) * vec2(6.2831853, 3.14159265);
+  vec3 dir = cos(lb.y) * (cos(lb.x) * uFaceU + sin(lb.x) * uFaceV) + sin(lb.y) * uFaceF;
+#else
   vec2 uv = (gl_FragCoord.xy + sub) / uSize * 2.0 - 1.0;
   vec3 dir = normalize(uFaceF + uv.x * uFaceU + uv.y * uFaceV);
+#endif
   // Rays sample at nearly the same distances, so each march step is a soft shell of cloud around the
   // camera rather than grain; each pass shifts the shells, and the passes average towards the true light.
-  float jitter = fract(0.5 + uPass * 0.6180340 + (uPass > 0.5 ? 0.6 * (marchJitter(gl_FragCoord.xy + uPass * 17.0) - 0.5) : 0.0));
+  // (Every pass, the first too, spreads its rays a little: a map of one pass is fine grain, never shells.)
+  float jitter = fract(0.5 + uPass * 0.6180340 + 0.6 * (marchJitter(gl_FragCoord.xy + uPass * 17.0) - 0.5));
   vec4 sum = vec4(0.0);
   // Nearest galaxy first: each one is seen through the dust of those before it.
   for (int i = 0; i < ${NEAR_GALAXIES}; i++) {
@@ -66,9 +74,11 @@ void main() {
 }
 `;
 
+const FINE_SIZE = 1024;
 const SKY_FRAG = /* glsl */ `
 uniform samplerCube uFrom;
 uniform samplerCube uTo;
+uniform vec2 uSizes;    // texels across a face of each map; a draft (coarser than the fine map) is drawn smooth
 uniform float uMix;
 uniform float uGain;
 uniform float uGrain;   // pixels per radian, for the grain of unresolved stars
@@ -80,9 +90,36 @@ float hash3(vec3 p) {
   return fract((p.x + p.y) * p.z);
 }
 
+// A cube map read with a cubic B-spline instead of linearly (four linear reads): no texel blocks where a
+// coarse map is magnified. (Offsets are taken on the face the direction falls on; a read past its edge is
+// simply a direction on the next face.)
+vec4 smoothCube(samplerCube map, vec3 d, float size) {
+  vec3 a = abs(d);
+  vec3 f, e1, e2;
+  if (a.x >= a.y && a.x >= a.z) { f = vec3(sign(d.x), 0.0, 0.0); e1 = vec3(0.0, 0.0, 1.0); e2 = vec3(0.0, 1.0, 0.0); }
+  else if (a.y >= a.z) { f = vec3(0.0, sign(d.y), 0.0); e1 = vec3(1.0, 0.0, 0.0); e2 = vec3(0.0, 0.0, 1.0); }
+  else { f = vec3(0.0, 0.0, sign(d.z)); e1 = vec3(1.0, 0.0, 0.0); e2 = vec3(0.0, 1.0, 0.0); }
+  float m = dot(d, f);
+  vec2 x = (vec2(dot(d, e1), dot(d, e2)) / m * 0.5 + 0.5) * size - 0.5;
+  vec2 i = floor(x), t = x - i;
+  vec2 t2 = t * t, t3 = t2 * t;
+  vec2 w0 = (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0, w1 = (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0;
+  vec2 w2 = (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0, w3 = t3 / 6.0;
+  vec2 g0 = w0 + w1, g1 = w2 + w3;
+  vec2 c0 = ((i - 1.0 + w1 / g0) + 0.5) / size * 2.0 - 1.0, c1 = ((i + 1.0 + w3 / g1) + 0.5) / size * 2.0 - 1.0;
+  return g0.y * (g0.x * textureCube(map, f + c0.x * e1 + c0.y * e2) + g1.x * textureCube(map, f + c1.x * e1 + c0.y * e2))
+       + g1.y * (g0.x * textureCube(map, f + c0.x * e1 + c1.y * e2) + g1.x * textureCube(map, f + c1.x * e1 + c1.y * e2));
+}
+
+vec4 readMap(samplerCube map, vec3 d, float size) {
+  return size < ${FINE_SIZE}.0 ? smoothCube(map, d, size) : textureCube(map, d);
+}
+
 void main() {
   vec3 d = normalize(vDir);
-  vec4 c = mix(textureCube(uFrom, vDir), textureCube(uTo, vDir), uMix);
+  // (Once the new map has faded in, the old one is not read at all.)
+  vec4 c = readMap(uTo, d, uSizes.y);
+  if (uMix < 0.999) c = mix(readMap(uFrom, d, uSizes.x), c, uMix);
   // The glow of a galaxy from inside is stars too faint to see one by one, but not so many that
   // they blur into fog: a fine grain of them, a little coarser than the pixels.
   vec3 cell = floor(d * uGrain * 1.4);
@@ -122,15 +159,23 @@ interface Job {
   target: THREE.WebGLCubeRenderTarget;
   view: View;
   steps: number;
-  strips: number;
-  done: number;
+  /** Progress: the face being marched, and the first of its rows not yet marched. */
+  face: number;
+  row: number;
   /** 0 writes the map; pass k > 0 is averaged into the k passes already there. */
   pass: number;
 }
 
-// (Strips must divide the size: a fractional row would leave a seam unmarched.)
-const DRAFT = { size: 512, steps: 40, strips: 2 };
-const FINE = { size: 1024, steps: 160, strips: 8, passes: 24, show: 4 };
+// The draft is the same march as the fine map, only coarser and a single pass: the same galaxy while the
+// camera moves as when it rests, never a different look to hand over from.
+const DRAFT = { size: 384, steps: 160 };
+const FINE = { size: FINE_SIZE, steps: 160, passes: 12, show: 3 };
+/**
+ * Texels marched per frame: as many as the frame rate allows. The budget grows while frames keep to 60 Hz
+ * and is cut back as soon as one runs late, before the pipeline would lower the resolution.
+ * (GPU timer queries were tried: on ANGLE / Metal they time far more than the march.)
+ */
+const TEXELS = { start: 24000, min: 12000, max: 300000, grow: 1.015, cut: 0.6, lateMs: 18.3, holdMs: 3000 };
 
 function capture(near: NearGalaxy[]): View {
   const p = near[0];
@@ -171,6 +216,13 @@ export class GalaxyVolume {
   private fade = 1;
   private finePasses = 0;
   private lastTime = 0;
+  /** Texels to march this frame, and when the last march was. */
+  texels = TEXELS.start;
+  private lastMarch = 0;
+  private frameMs = 16.7;
+  /** After a late frame: no growth until then, and never again to the level that was late, for a while. */
+  private holdUntil = 0;
+  private ceiling = TEXELS.max;
 
   constructor() {
     const vec4s = (): THREE.Vector4[] => Array.from({ length: NEAR_GALAXIES }, () => new THREE.Vector4());
@@ -184,7 +236,7 @@ export class GalaxyVolume {
         uWeight: { value: new Array(NEAR_GALAXIES).fill(0) },
         uCount: { value: 0 },
         uFaceU: { value: new THREE.Vector3() }, uFaceV: { value: new THREE.Vector3() }, uFaceF: { value: new THREE.Vector3() },
-        uSize: { value: 1 }, uSteps: { value: 1 }, uPass: { value: 0 }, uSettle: { value: 0 }, uNoise: { value: galaxyNoise },
+        uSize: { value: 1 }, uSteps: { value: 1 }, uPass: { value: 0 }, uSettle: { value: 0 }, uNoise: { value: galaxyNoise }, ...galaxyKnotUniforms,
       },
       blending: THREE.CustomBlending, blendSrc: THREE.ConstantAlphaFactor, blendDst: THREE.OneMinusConstantAlphaFactor,
       depthTest: false, depthWrite: false,
@@ -193,7 +245,7 @@ export class GalaxyVolume {
     this.sky = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
-      uniforms: { uFrom: { value: null }, uTo: { value: null }, uMix: { value: 1 }, uGain: { value: 1 }, uGrain: { value: 1000 } },
+      uniforms: { uFrom: { value: null }, uTo: { value: null }, uSizes: { value: new THREE.Vector2(FINE_SIZE, FINE_SIZE) }, uMix: { value: 1 }, uGain: { value: 1 }, uGrain: { value: 1000 } },
       side: THREE.BackSide, transparent: true, premultipliedAlpha: true, depthTest: false, depthWrite: false,
     });
     this.mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), this.sky);
@@ -223,7 +275,7 @@ export class GalaxyVolume {
     if (!this.shown || !this.shownView) {
       // Nothing to show yet: the first draft takes a few frames.
       if (!this.job) {
-        this.job = { target: this.drafts[0], view: now, steps: DRAFT.steps, strips: DRAFT.strips, done: 0, pass: 0 };
+        this.job = { target: this.drafts[0], view: now, steps: DRAFT.steps, face: 0, row: 0, pass: 0 };
         this.setGalaxies(near);
       }
       this.advance(renderer);
@@ -241,12 +293,12 @@ export class GalaxyVolume {
     if (!this.job && this.fade >= 1) {
       if (stale(this.shownView!, now)) {
         const target = this.shown === this.drafts[0] ? this.drafts[1] : this.drafts[0];
-        this.job = { target, view: now, steps: DRAFT.steps, strips: DRAFT.strips, done: 0, pass: 0 };
+        this.job = { target, view: now, steps: DRAFT.steps, face: 0, row: 0, pass: 0 };
         this.finePasses = 0;
         this.setGalaxies(near);
       } else if (this.finePasses < FINE.passes) {
         // At rest: a sharper map first, then more passes averaged into it until the grain of the march is gone.
-        this.job = { target: this.fine, view: now, steps: FINE.steps, strips: FINE.strips, done: 0, pass: this.finePasses };
+        this.job = { target: this.fine, view: now, steps: FINE.steps, face: 0, row: 0, pass: this.finePasses };
         this.setGalaxies(near);
       }
     }
@@ -254,6 +306,69 @@ export class GalaxyVolume {
     this.sky.uniforms.uMix.value = this.fade;
     this.sky.uniforms.uGain.value = brightness;
     this.mesh.visible = true;
+  }
+
+  /**
+   * For tuning against the survey: the whole sky from the camera in galactic longitude and latitude
+   * (l = 0 towards `centre`, the plate carree of the NASA maps), linear light, `width` x `width / 2`, RGBA rows bottom-up.
+   * Each galaxy is marched on its own and their light added. Slow (seconds): a tool, not for frames.
+   */
+  panorama(near: NearGalaxy[], centre: THREE.Vector3, north: THREE.Vector3, width = 1024, passes = 12, steps = FINE.steps): Float32Array | null {
+    const renderer = probeRenderer();
+    if (!renderer) return null;
+    const height = width / 2;
+    const material = new THREE.ShaderMaterial({
+      vertexShader: MARCH_VERT, fragmentShader: MARCH_FRAG, uniforms: this.march.uniforms, defines: { PANORAMA: 1 },
+      blending: THREE.CustomBlending, blendSrc: THREE.ConstantAlphaFactor, blendDst: THREE.OneMinusConstantAlphaFactor,
+      depthTest: false, depthWrite: false,
+    });
+    const quad = new FullScreenQuad(material);
+    const target = new THREE.WebGLRenderTarget(width, height, { type: THREE.FloatType, depthBuffer: false });
+    const u = this.march.uniforms;
+    const f = new THREE.Vector3().copy(centre).normalize();
+    const n = new THREE.Vector3().copy(north).normalize();
+    const side = new THREE.Vector3().crossVectors(f, n);
+    const sum = new Float32Array(width * height * 4);
+    const pixels = new Float32Array(width * height * 4);
+    const previous = renderer.getRenderTarget();
+    const autoClear = renderer.autoClear;
+    for (const g of near) {
+      this.setGalaxies([{ ...g, weight: 1 }]);
+      u.uFaceU.value.copy(f);
+      u.uFaceV.value.copy(side);
+      u.uFaceF.value.copy(n);
+      u.uSize.value = width;
+      u.uSteps.value = steps;
+      u.uSettle.value = 1;
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.autoClear = false;
+      const strips = 8;
+      for (let pass = 0; pass < passes; pass++) {
+        u.uPass.value = pass;
+        material.blendAlpha = 1 / (pass + 1);
+        for (let s = 0; s < strips; s++) {
+          target.scissorTest = true;
+          target.scissor.set(0, (s * height) / strips, width, height / strips);
+          renderer.setRenderTarget(target);
+          quad.render(renderer);
+        }
+      }
+      target.scissorTest = false;
+      renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+      for (let i = 0; i < sum.length; i++) sum[i] += pixels[i];
+    }
+    renderer.setRenderTarget(previous);
+    renderer.autoClear = autoClear;
+    target.dispose();
+    material.dispose();
+    quad.dispose();
+    // The sky map's own job must start again: its uniforms were used.
+    this.job = null;
+    this.shown = null;
+    this.shownView = null;
+    return sum;
   }
 
   private setGalaxies(near: NearGalaxy[]): void {
@@ -272,12 +387,30 @@ export class GalaxyVolume {
     });
   }
 
-  /** Marches the next strip of the current job; shows the map when the last one is in. */
+  /** Marches the next rows of the current job, as many as fit in the frame's budget; shows the map when the last are in. */
   private advance(renderer: THREE.WebGLRenderer): void {
     const job = this.job!;
     const u = this.march.uniforms;
     const size = job.target.width;
-    const face = Math.floor(job.done / job.strips), strip = job.done % job.strips;
+    const face = job.face;
+    // As many rows as the budget allows; the budget follows the frame time.
+    const t = performance.now(), dt = t - this.lastMarch;
+    this.lastMarch = t;
+    if (dt < 100) {
+      // (Smoothed: a lone slow frame, a page or a texture loading, says nothing about the march.)
+      this.frameMs += (dt - this.frameMs) * 0.15;
+      if (this.frameMs > TEXELS.lateMs && t > this.holdUntil - TEXELS.holdMs + 500) {
+        this.ceiling = Math.max(this.texels * 0.8, TEXELS.min);
+        this.texels *= TEXELS.cut;
+        this.holdUntil = t + TEXELS.holdMs;
+      } else if (this.frameMs < 17.3 && t > this.holdUntil) {
+        this.texels *= TEXELS.grow;
+      }
+      // The ceiling creeps back up slowly: the load of the rest of the frame changes.
+      this.ceiling = Math.min(this.ceiling * 1.003, TEXELS.max);
+      this.texels = THREE.MathUtils.clamp(this.texels, TEXELS.min, this.ceiling);
+    }
+    const rows = Math.min(size - job.row, Math.max(2, Math.floor(this.texels / size)));
     const [fu, fv, ff] = FACES[face];
     u.uFaceU.value.fromArray(fu);
     u.uFaceV.value.fromArray(fv);
@@ -285,11 +418,10 @@ export class GalaxyVolume {
     u.uSize.value = size;
     u.uSteps.value = job.steps;
     u.uPass.value = job.pass;
-    u.uSettle.value = job.target === this.fine ? 1 : 0;
+    u.uSettle.value = 1;
     this.march.blendAlpha = 1 / (job.pass + 1);
-    const rows = size / job.strips;
     job.target.scissorTest = true;
-    job.target.scissor.set(0, strip * rows, size, rows);
+    job.target.scissor.set(0, job.row, size, rows);
     const previous = renderer.getRenderTarget();
     const autoClear = renderer.autoClear;
     // Later passes blend with what the earlier ones left in the map.
@@ -298,13 +430,20 @@ export class GalaxyVolume {
     this.quad.render(renderer);
     renderer.setRenderTarget(previous);
     renderer.autoClear = autoClear;
-    if (++job.done < 6 * job.strips) return;
+    job.row += rows;
+    if (job.row >= size) {
+      job.row = 0;
+      job.face++;
+    }
+    if (job.face < 6) return;
     this.job = null;
     if (job.target === this.fine) this.finePasses = job.pass + 1;
     // The fine map is noisy until a few passes are in: until then the draft stays up.
     if (job.pass !== (job.target === this.fine ? FINE.show - 1 : 0)) return;
-    this.sky.uniforms.uFrom.value = (this.shown ?? job.target).texture;
+    const from = this.shown ?? job.target;
+    this.sky.uniforms.uFrom.value = from.texture;
     this.sky.uniforms.uTo.value = job.target.texture;
+    this.sky.uniforms.uSizes.value.set(from.width, job.target.width);
     this.fade = this.shown ? 0 : 1;
     this.shown = job.target;
     this.shownView = job.view;

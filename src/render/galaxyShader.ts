@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng';
 import { NOISE } from './glsl';
+import { GALAXIES } from '../universe/universe';
 
 // The march reads its clouds from a tiling volume of random values: one filtered fetch per
 // octave instead of eight hashes, which is most of what a galaxy costs to draw.
@@ -22,6 +23,16 @@ function makeNoise(): THREE.Data3DTexture {
 /** Bind as the uniform uNoise of every material that includes GALAXY_GLSL. */
 export const galaxyNoise = makeNoise();
 
+const KNOTS = 4;
+/** Spread into the uniforms of every material that includes GALAXY_GLSL: the galaxies' giant star-forming regions. */
+export const galaxyKnotUniforms: Record<string, THREE.IUniform> = (() => {
+  const knots = GALAXIES.filter((g) => g.knot).slice(0, KNOTS);
+  return {
+    uKnot: { value: Array.from({ length: KNOTS }, (_, i) => new THREE.Vector4(...(knots[i]?.knot ?? [0, 0, 1, 0]))) },
+    uKnotSeed: { value: Array.from({ length: KNOTS }, (_, i) => knots[i]?.seed ?? -1e9) },
+  };
+})();
+
 // One model of a galaxy's light, marched along view rays. It is used twice: into a cube
 // map for the galaxy the camera is inside or close to, and directly on a billboard for
 // every galaxy further away, so a galaxy looks the same before and after the hand-over.
@@ -34,6 +45,9 @@ export const galaxyNoise = makeNoise();
 export const GALAXY_GLSL = /* glsl */ `
 ${NOISE}
 uniform highp sampler3D uNoise;
+// Giant star-forming regions (x, z, radius, brightness in the galaxy's frame), each of the galaxy with that seed.
+uniform vec4 uKnot[${KNOTS}];
+uniform float uKnotSeed[${KNOTS}];
 
 // Value noise, 0..1, smoothly interpolated.
 float gnoise(vec3 p) {
@@ -91,6 +105,24 @@ float gLane(float theta, float r, vec4 gA, vec4 gB) {
 
 const float LANE_LEAD = 0.16;
 
+// Where along a step from height ya to yb to look up the clouds of a layer exp(-|y| / h): at the fraction u
+// of its column. Every pass of the sky map takes another u, so its samples spread over the dust the step
+// passes through instead of sitting on shells around the camera (which show as rings and streaks).
+float gPick(float ya, float yb, float h, float u) {
+  float ea = exp(-abs(ya) / h), eb = exp(-abs(yb) / h);
+  float dy = ya - yb;
+  if (abs(dy) < 1e-3 * h) return u;
+  float y;
+  if (ya * yb >= 0.0) {
+    if (abs(eb - ea) < 1e-4) return u;
+    y = sign(ya + yb) * -h * log(max(mix(ea, eb, u), 1e-30));
+  } else {
+    float ca = 1.0 - ea, s = u * (ca + 1.0 - eb);
+    y = s < ca ? sign(ya) * -h * log(ea + s) : sign(yb) * -h * log(max(1.0 - (s - ca), 1e-30));
+  }
+  return clamp((ya - y) / dy, 0.0, 1.0);
+}
+
 // ro, rd: ray in the galaxy's frame; pixel: radians across one pixel, which limits the cloud detail.
 // Returns light (premultiplied) and how much of the background is hidden.
 // uSettle: 0 for a single look; 1 where many jittered passes are averaged, which may then resolve
@@ -138,8 +170,9 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
     // and the clouds of a disc seen from above stay sharp and free of grain however long the step.
     // (A step that only approaches the plane is sampled at its nearer end, unless it runs along the plane.)
     bool cross = ya * yb < 0.0;
+    // (Where many passes are averaged, each samples its step somewhere else in the dust it passes through.)
     float along = mix(jitter, abs(ya) < abs(yb) ? 0.0 : 1.0, clamp(abs(yb - ya) / (gA.z * 0.05), 0.0, 1.0));
-    vec3 p = ro + rd * (ta + ds * (cross ? ya / (ya - yb) : along));
+    vec3 p = ro + rd * (ta + ds * (uSettle > 0.5 ? gPick(ya, yb, hd, jitter) : cross ? ya / (ya - yb) : along));
     // What one sample stands for: the length of the ray inside the layer of stars, and of dust.
     float reach = cross ? min(ds, gA.z * 0.5 / max(abs(rd.y), 1e-3)) : ds;
     float reachD = cross ? min(ds, hd / max(abs(rd.y), 1e-3)) : ds;
@@ -190,6 +223,12 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // Star-forming regions glow pink inside the densest clouds of the arms.
       float knots = smoothstep(0.64, 0.78, clouds) * young;
       born += vec3(1.0, 0.25, 0.4) * (discLum * radial * 2.5 * knots * gas);
+      for (int k = 0; k < ${KNOTS}; k++) {
+        if (abs(gC.w - uKnotSeed[k]) > 1e-3) continue;
+        vec2 dq = (p.xz - uKnot[k].xy) / uKnot[k].z;
+        float w = exp(-dot(dq, dq) * 2.0) * (0.4 + 1.2 * clouds);
+        born += vec3(1.0, 0.32, 0.5) * (discLum * uKnot[k].w * w * gColumn(ya, yb, gA.z * 0.3, ds));
+      }
       // Most of the dust sits in cloud complexes, opaque ones, with clearer space between them.
       // (From too far to tell them apart, they blend into the lanes along the arms.)
       // Up close the clouds are opaque with clear gaps between them; a step that blurs many of them sees their average.
@@ -201,6 +240,9 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // It gathers in narrow lanes along the inner edges of the arms, which the star clouds push about.
       float lane = gLane(theta + LANE_LEAD + 0.5 * (clouds - 0.5) + 0.25 * sway, r, gA, gB);
       float ring = smoothstep(gA.x * 0.03, gA.x * 0.1, r) * edge;
+      // No dust right around the camera: up close a single cloud would fill half the sky. (The Sun sits in
+      // such a cavity, the Local Bubble, a few hundred light years across; every camera carries one along.)
+      ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, ta - 0.5 * ds);
       tau = gB.w * ring * exp(-(r - 0.5 * gA.x) / (1.4 * gA.y)) * (0.1 + 2.6 * lane) * (0.3 + 2.2 * dense) * gas / 2200.0;
       }
     }

@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng';
-import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
-import { GALAXY_GLSL, galaxyNoise } from './galaxyShader';
+import { GALAXIES, armStrengthOf, densityOf, toGalaxy, type GalaxyData } from '../universe/universe';
+import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
-import { HomeSky, PLANE_FADE } from './homeSky';
+import { HomeSky } from './homeSky';
 import { SOFT_LAYER, softLayer } from './pipeline';
 
 // A galaxy is marched where it is drawn, every frame, whenever the camera is outside its disc.
@@ -105,7 +105,7 @@ varying vec2 vQuad;
 void main() {
   vec4 col = vec4(0.0);
   if (vMode.y < 1.0) {
-    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
+    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, int(vMode.z), marchJitter(gl_FragCoord.xy), 2.0 / uPixelsPerRadian) * (1.0 - vMode.y);
   }
   if (vMode.y > 0.0) col.rgb += vSpot.rgb * (exp(-dot(vQuad, vQuad) * vSpot.a) * vMode.y);
   gl_FragColor = col * vMode.x;
@@ -169,6 +169,10 @@ export class GalaxyCloud {
   private readonly sparkle: THREE.ShaderMaterial;
   private sparklePoints: THREE.Points | null = null;
   private sparkleOf = -1;
+  /** The galaxy whose sparkle is being built in idle time (building it takes a frame's worth of work). */
+  private sparkleBuilding = -1;
+  /** Frames left to draw the sparkle even unseen, so its shader is compiled before it is first needed. */
+  private sparkleWarm = 2;
   private readonly near: NearGalaxy[] = [];
   private readonly eyes = GALAXIES.map(() => ({ x: 0, y: 0, z: 0 }));
 
@@ -198,7 +202,7 @@ export class GalaxyCloud {
     this.field = make({
       uCam: { value: new THREE.Vector3() }, uPixelsPerRadian: { value: 1000 }, uFullPpr: { value: 1000 }, uBig: { value: new THREE.Vector2(...BIG_PX) },
       uBrightness: { value: 1 }, uNearId: { value: new THREE.Vector2(-1, -1) }, uNearWeight: { value: new THREE.Vector2() },
-      uHideClouds: { value: 0 }, uNoise: { value: galaxyNoise },
+      uHideClouds: { value: 0 }, uNoise: { value: galaxyNoise }, ...galaxyKnotUniforms,
     }, {});
     // The same galaxies on the soft layer; only the resolution differs.
     this.fieldSoft = make({ ...this.field.uniforms, uPixelsPerRadian: { value: 1000 } }, { SOFT_PASS: 1 });
@@ -257,6 +261,27 @@ export class GalaxyCloud {
     return points;
   }
 
+  /**
+   * Tuning aid (scripts/gpano.mjs): the model's whole sky from `cam` in galactic coordinates, the projection of the
+   * NASA survey maps, in linear light as the sky map would show it inside the disc (before exposure). The frame is
+   * that of the first galaxy listed: l = 0 towards its centre, b = 90 deg along its pole.
+   */
+  panorama(cam: { x: number; y: number; z: number }, width = 1024, passes = 12, ids = [0, 1, 2]): Float32Array | null {
+    const frame = GALAXIES[ids[0]];
+    const list: NearGalaxy[] = ids.map((id) => {
+      const eye = { x: 0, y: 0, z: 0 };
+      toGalaxy(GALAXIES[id], cam.x, cam.y, cam.z, eye);
+      return { galaxy: GALAXIES[id], eye, weight: 1 };
+    });
+    const a = frame.axes;
+    const toC = new THREE.Vector3(frame.x - cam.x, frame.y - cam.y, frame.z - cam.z);
+    const pole = new THREE.Vector3(a[3], a[4], a[5]);
+    const centre = toC.addScaledVector(pole, -toC.dot(pole));
+    const out = this.volume.panorama(list, centre, pole, width, passes);
+    if (out) for (let i = 0; i < out.length; i++) if (i % 4 !== 3) out[i] *= INSIDE_GAIN;
+    return out;
+  }
+
   /** cam: position in the universe (ly); gain: brightness of all galaxy light, 1 = as calibrated. */
   update(cam: { x: number; y: number; z: number }, pixelsPerRadian: number, gain: number): void {
     // The galaxies near enough for the sky map, nearest (in their own radii) first.
@@ -280,16 +305,20 @@ export class GalaxyCloud {
       out = THREE.MathUtils.smoothstep(Math.max(Math.abs(host.eye.y) - g.height, Math.hypot(host.eye.x, host.eye.z) - g.radius), 0, g.radius * 0.35);
     }
     gain *= THREE.MathUtils.lerp(INSIDE_GAIN, OUTSIDE_GAIN, out);
-    const surveyed = this.home.update(host, pixelsPerRadian, this.survey ? HOME_GAIN : 0);
-    // Out of the disc the host is marched directly; what neither that nor the survey shows is left to the sky map.
-    let direct = 0;
-    if (host) {
+    // And it adapts to where in the disc it is: towards the core the sky is many times brighter than
+    // half-way out (calibrated there, where the Sun is), and would be a white glare.
+    if (host && out < 1) {
       const g = host.galaxy;
-      const r = Math.hypot(host.eye.x, host.eye.z);
-      direct = g.discLum > 0
-        ? Math.max(THREE.MathUtils.smoothstep(Math.abs(host.eye.y), PLANE_FADE[0] * g.height, PLANE_FADE[1] * g.height), THREE.MathUtils.smoothstep(r, 0.85 * g.radius, 1.05 * g.radius))
-        : 1;
+      const local = (x: number, z: number): number => densityOf(g, x, 0, z, false) + 1e-6;
+      const ratio = local(host.eye.x, host.eye.z) / local(0.5 * g.radius, 0);
+      gain *= THREE.MathUtils.lerp(THREE.MathUtils.clamp(Math.pow(ratio, -0.9), 0.05, 1.5), 1, out);
     }
+    const surveyed = this.home.update(host, pixelsPerRadian, this.survey ? HOME_GAIN : 0);
+    // Inside a galaxy, in its disc, above it and in its outskirts, it is the sky map's: one march of one model,
+    // so leaving the disc changes the perspective and nothing else. Only well outside, where the whole galaxy
+    // is in view and a march of its few layers on screen draws the same thing sharper, does that take over.
+    // (What the survey shows, the map leaves.)
+    const direct = host ? THREE.MathUtils.smoothstep(span(host), 1.5, 2.1) : 0;
     const mapped = Math.max(0, 1 - direct - (this.survey ? HomeSky.cover(host) : 0));
     this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped, pixelsPerRadian);
 
@@ -313,14 +342,22 @@ export class GalaxyCloud {
       // (Seen edge-on they would pile up into sand along the far side of the disc.)
       const steep = Math.abs(host.eye.y) / Math.max(Math.hypot(host.eye.x, host.eye.z), g.radius * 0.3);
       show = THREE.MathUtils.smoothstep(outside, g.radius * 0.03, g.radius * 0.4) * (1 - THREE.MathUtils.smoothstep(span(host), 1.2, 3.2)) * THREE.MathUtils.smoothstep(steep, 0.12, 0.4);
-      if (show > 0.01 && this.sparkleOf !== g.id) {
-        if (this.sparklePoints) {
-          this.group.remove(this.sparklePoints);
-          this.sparklePoints.geometry.dispose();
-        }
-        this.sparklePoints = this.makeSparkle(g);
-        this.sparkleOf = g.id;
-        this.group.add(this.sparklePoints);
+      // Built ahead, while the camera is still inside the disc, in idle time: never in the frame it is needed.
+      if (this.sparkleOf !== g.id && this.sparkleBuilding !== g.id) {
+        this.sparkleBuilding = g.id;
+        const build = (): void => {
+          if (this.sparkleBuilding !== g.id) return;
+          if (this.sparklePoints) {
+            this.group.remove(this.sparklePoints);
+            this.sparklePoints.geometry.dispose();
+          }
+          this.sparklePoints = this.makeSparkle(g);
+          this.sparkleOf = g.id;
+          this.sparkleBuilding = -1;
+          this.group.add(this.sparklePoints);
+        };
+        if ('requestIdleCallback' in window) requestIdleCallback(build, { timeout: 1500 });
+        else setTimeout(build, 50);
       }
       if (this.sparklePoints && this.sparkleOf === g.id) {
         const a = g.axes;
@@ -333,7 +370,9 @@ export class GalaxyCloud {
         this.sparklePoints.matrixWorldNeedsUpdate = true;
       }
     }
-    if (this.sparklePoints) this.sparklePoints.visible = show > 0.01 && this.sparkleOf === host?.galaxy.id;
+    const warm = this.sparklePoints !== null && this.sparkleWarm > 0;
+    if (warm) this.sparkleWarm--;
+    if (this.sparklePoints) this.sparklePoints.visible = warm || (show > 0.01 && this.sparkleOf === host?.galaxy.id);
     this.sparkle.uniforms.uPixelsPerRadian.value = pixelsPerRadian;
     this.sparkle.uniforms.uGain.value = show * 0.6 * gain;
   }
