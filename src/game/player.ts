@@ -23,6 +23,8 @@ export const MAX_SPEED = 1e7 * KM_PER_LY; // km/s — 10 Mly/s, intergalactic
 export const SPEED_STEP = 1.3;
 /** Seconds for the actual velocity to settle on the setting (exponential time constant). */
 const INERTIA = 0.11;
+/** Seconds for the proximity speed cap to rise e-fold as the camera leaves a body. */
+const RAMP = 0.45;
 const LOOK_RAD_PER_PX = 0.0022;
 const ORBIT_RAD_PER_PX = 0.005;
 
@@ -66,6 +68,13 @@ export class Player {
   limited = false;
   /** The fastest the proximity limit allows here, km/s (Infinity far from everything). */
   cap = Infinity;
+  /**
+   * The cap as it eases up: leaving a planet, the proximity limit rises with the fourth power of the
+   * altitude, so obeying it at once would take the camera from a fraction of c to light years a second
+   * within a few frames (it reads as a jump). It may fall at once, but rises at most e-fold every RAMP s.
+   */
+  private easedCap = Infinity;
+  private lastLocal = new THREE.Vector3(NaN, 0, 0);
   /** C / T: turn the camera towards a target; with 'hold' keep it centred. */
   aim: { target: Target; hold: boolean } | null = null;
   /** Called when the autopilot reaches its destination. */
@@ -135,7 +144,11 @@ export class Player {
     if (thrust.lengthSq() > 0) this.autopilot = null;
 
     this.limited = false;
-    this.cap = this.speedLimit(obstacles);
+    const limitHere = this.speedLimit(obstacles);
+    // After a jump (a scenic spot, a reload, the autopilot) there's nothing to ease from.
+    const jumped = !(before.distanceTo(this.lastLocal) <= Math.max(Math.min(this.easedCap, limitHere), this.speed, 1) * Math.max(dt, 1 / 30) * 4);
+    this.easedCap = this.autopilot || jumped ? limitHere : Math.min(limitHere, this.easedCap * Math.exp(dt / RAMP));
+    this.cap = this.easedCap;
     if (this.autopilot) {
       this.flyAutopilot(dt, simTime, obstacles);
     } else {
@@ -154,6 +167,7 @@ export class Player {
 
     this.collide(obstacles);
     this.speed = dt > 0 ? before.distanceTo(this.local) / dt : 0;
+    this.lastLocal.copy(this.local);
   }
 
   private rotate(dt: number, input: Input, simTime: number, ctx: ViewContext): void {
@@ -241,13 +255,14 @@ export class Player {
       offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
     }
     if (ap.target.kind === 'blackhole') {
-      // Arrive a little above the plane of the disc, where its far side shows lensed over the shadow.
+      // Arrive above the disc, some 23 degrees over its plane: the classic view, its far side lensed over the shadow.
       const [nx, ny, nz] = ap.target.bh.axis;
       const normal = q1Vec.set(nx, ny, nz);
       const up = Math.sign(offset.dot(normal)) || 1;
       const side = sideVec.copy(offset).addScaledVector(normal, -offset.dot(normal));
       if (side.lengthSq() < 1e-6) side.set(1, 0, 0).addScaledVector(normal, -normal.x);
       side.normalize();
+      // Arrive a little above the plane of the disc, where its far side shows lensed over the shadow.
       const pref = side.multiplyScalar(Math.cos(0.2)).addScaledVector(normal, Math.sin(0.2) * up).normalize();
       const near = 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40);
       offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
