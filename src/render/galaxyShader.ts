@@ -167,8 +167,16 @@ float gPick(float ya, float yb, float h, float u) {
 // uSettle: 0 for a single look; 1 where many jittered passes are averaged, which may then resolve
 // detail finer than a step (it averages out instead of showing as grain). Unset, it is 0.
 uniform float uSettle;
+#ifdef MARCH_DEPTH
+// Where along the ray the light and the dust of a march are (log distance, weighted by each): what moves on
+// screen with the camera, for reusing the last frames' marches.
+float gDL = 0.0, gWL = 0.0, gDA = 0.0, gWA = 0.0;
+#endif
 vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps, float jitter, float pixel) {
   float stepLimit = mix(1.0, 30.0, uSettle);
+#ifdef STEP_LIMIT
+  stepLimit = min(stepLimit, STEP_LIMIT);
+#endif
   float inLayer = 1.0 - smoothstep(1.0 * gA.z, 2.5 * gA.z, abs(ro.y));
   float R = gA.x * 1.2;
   float b = dot(ro, rd);
@@ -302,7 +310,13 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
     // The dust lies in the middle of the old stars: where a step crosses it, half of them shine in front of it.
     // The newborn ones are still inside it.
     vec3 veil = sqrt(att);
-    light += trans * (e * (cross ? 0.5 + 0.5 * att : veil) + born * veil);
+    vec3 added = trans * (e * (cross ? 0.5 + 0.5 * att : veil) + born * veil);
+    light += added;
+#ifdef MARCH_DEPTH
+    float lt = log(max(ta - 0.5 * ds, 1.0));
+    float dl = dot(added, vec3(0.3333)), da = dot(trans * (1.0 - att), vec3(0.3333));
+    gDL += dl * lt; gWL += dl; gDA += da * lt; gWA += da;
+#endif
     trans *= att;
     if (trans.b < 0.002) break;
   }

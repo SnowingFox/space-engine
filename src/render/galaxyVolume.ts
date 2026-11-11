@@ -199,6 +199,9 @@ function stale(view: View, now: View): boolean {
 }
 
 /**
+ * (No longer drawn: the galaxies around the camera are marched on screen every frame, GalaxyHost. What is
+ * left is the panorama, the tuning tool scripts/gpano.mjs uses.)
+ *
  * The galaxies around the camera, drawn as a sky. Marching them costs far more than a
  * frame can afford at full resolution, but their light barely changes from frame to
  * frame: it is marched into a cube map, a face at a time, only after the camera has

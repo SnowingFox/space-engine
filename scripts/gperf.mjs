@@ -49,7 +49,7 @@ for (const [name, setup, step] of views) {
       else {
         times.sort((a, b) => a - b);
         const mean = times.reduce((a, b) => a + b, 0) / times.length;
-        done([mean, times[Math.floor(times.length * 0.95)], 1000 / mean, se.pipeline.pixelRatio, se.cloud.volume.texels]);
+        done([mean, times[Math.floor(times.length * 0.95)], 1000 / mean, se.pipeline.pixelRatio, (se.cloud.host ? se.cloud.host.cfg.steps : se.cloud.volume.texels)]);
       }
     };
     requestAnimationFrame(tick);
@@ -60,7 +60,7 @@ for (const [name, setup, step] of views) {
       if (attempt >= 3) throw e;
     }
   }
-  console.log(`${name} | ${out[0].toFixed(1)} | ${out[1].toFixed(1)} | ${out[2].toFixed(0)} | ${out[3].toFixed(2)} | ${(out[4] / 1000).toFixed(0)}k texels/frame`);
+  console.log(`${name} | ${out[0].toFixed(1)} | ${out[1].toFixed(1)} | ${out[2].toFixed(0)} | ${out[3].toFixed(2)} | ${out[4] < 1000 ? `${Math.round(out[4])} march steps` : `${(out[4] / 1000).toFixed(0)}k texels/frame`}`);
   await page.close();
 }
 await browser.close();

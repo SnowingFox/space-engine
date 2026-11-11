@@ -558,7 +558,7 @@ function frame(now: number): void {
   const low = nearBody as BodyState | null;
 
   player.galactic(gal);
-  cloud.update(gal, pipeline.pixelsPerRadian, 1);
+  cloud.update(gal, pipeline.pixelsPerRadian, 1, pipeline.bgCamera);
   nebulae.update(gal, pipeline.bgCamera, pipeline.renderer, pipeline.pixelsPerRadian, pipeline.pixelRatio);
   travel.set(gal.x - lastGal.x, gal.y - lastGal.y, gal.z - lastGal.z);
   lastGal.set(gal.x, gal.y, gal.z);

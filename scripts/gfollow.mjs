@@ -32,14 +32,16 @@ for (const [name, setup, v] of cases) {
     const look = (x, y, z) => { const l = Math.hypot(x, y, z); const f = p.local.clone().set(x / l, y / l, z / l); p.quat.setFromUnitVectors(p.local.clone().set(0, 0, -1), f); };
     ${setup};
     const V = ${JSON.stringify(v)};
-    const vol = se.cloud.volume;
+    // (The viewpoint the galaxy around the camera is drawn from: GalaxyHost's march, or the old sky map's.)
+    const shownEye = () => (se.cloud.shownEye ? se.cloud.shownEye() : se.cloud.volume.shownEye());
     let last = performance.now(), t0 = last;
     const shown = [], cam = [];
     const f = (n) => {
       const dt = Math.min((n - last) / 1000, 0.1); last = n;
+      // (Read before this frame's move: what is on screen was drawn from where the camera was then.)
+      if (n - t0 > 5000) { const g = { x: 0, y: 0, z: 0 }; p.galactic(g); cam.push([g.x, g.y, g.z]); shown.push(shownEye()); }
       if (n - t0 > 3000) { p.local.x += V[0] * dt * LY; p.local.y += V[1] * dt * LY; p.local.z += V[2] * dt * LY; }
-      if (n - t0 > 5000) { const g = { x: 0, y: 0, z: 0 }; p.galactic(g); cam.push([g.x, g.y, g.z]); shown.push(vol.shownEye()); }
-      if (n - t0 < 8000) requestAnimationFrame(f); else done({ shown, cam, mesh: vol.mesh.visible });
+      if (n - t0 < 8000) requestAnimationFrame(f); else done({ shown, cam, host: !!se.cloud.shownEye });
     };
     requestAnimationFrame(f);
   })`);
@@ -49,6 +51,7 @@ for (const [name, setup, v] of cases) {
       if (attempt >= 3) throw e;
     }
   }
+  const drawnBy = (o) => (o.host ? 'on-screen march' : 'sky map');
   const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
   const camStep = out.cam.slice(1).map((c, i) => d(c, out.cam[i]));
   let line;
@@ -59,8 +62,8 @@ for (const [name, setup, v] of cases) {
     const med = q(0.5);
     const still = steps.filter((x) => x < 0.2 * Math.max(med, 1e-9)).length;
     const lags = out.shown.map((s, i) => (s ? d(s, out.cam[i]) : NaN)).filter((x) => !isNaN(x)).sort((a, b) => a - b);
-    line = `${q(0.5).toFixed(2)}, ${q(0.1).toFixed(2)}, ${q(0.9).toFixed(2)}, ${steps[steps.length - 1].toFixed(2)} | ${still} of ${steps.length} | ${lags[lags.length >> 1].toFixed(1)} | sky map`;
-  } else line = '- | - | - | on-screen march (follows every frame)';
+    line = `${q(0.5).toFixed(2)}, ${q(0.1).toFixed(2)}, ${q(0.9).toFixed(2)}, ${steps[steps.length - 1].toFixed(2)} | ${still} of ${steps.length} | ${lags[lags.length >> 1].toFixed(1)} | ${drawnBy(out)}`;
+  } else line = '- | - | - | billboard march (follows every frame)';
   camStep.sort((a, b) => a - b);
   console.log(`${name} | ${camStep[camStep.length >> 1].toFixed(2)} | ${line}`);
   await page.close();

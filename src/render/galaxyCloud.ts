@@ -2,13 +2,14 @@ import * as THREE from 'three';
 import { Rng } from '../core/rng';
 import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
 import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
+import { GalaxyHost } from './galaxyHost';
 import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
 import { HomeSky } from './homeSky';
 import { SOFT_LAYER, softLayer } from './pipeline';
 
-// A galaxy is marched where it is drawn, every frame, whenever the camera is outside its disc.
-// Inside a disc the view is the surveyed sky (HomeSky); where that does not apply, in the core,
-// the galaxy is marched into a sky map instead, a few strips per frame.
+// Every galaxy is marched where it is drawn, every frame, from where the camera is: the ones around the camera
+// (inside, above or near them) on screen by GalaxyHost, with many frames averaged; every other one on a
+// billboard. (Inside the disc of a spiral the surveyed sky, HomeSky, may stand in for the model.)
 const NEAR_START = 6, NEAR_END = 8;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
@@ -185,8 +186,15 @@ function gamma(rng: Rng, k: number, scale: number): number {
 /** Every galaxy of the universe: a marched sky for the ones around the camera, billboards for the rest. */
 export class GalaxyCloud {
   readonly group = new THREE.Group();
-  private readonly volume = new GalaxyVolume();
+  /** (Only for the tuning tool, panorama: built when first asked for.) */
+  private volume: GalaxyVolume | null = null;
+  private readonly host = new GalaxyHost();
   private readonly home = new HomeSky();
+  /** The camera the background is drawn with: the black hole lens draws it with others too. */
+  private camera: THREE.PerspectiveCamera | null = null;
+  /** Billboard weights of the near galaxies, for the main view and for any other (the lens's cube map). */
+  private readonly nearWeight = new THREE.Vector2();
+  private readonly allWeight = new THREE.Vector2(1, 1);
   /** Around the Sun, show the Milky Way as surveyed from Earth instead of the model (off: every galaxy is the model). */
   survey = false;
   private readonly field: THREE.ShaderMaterial;
@@ -200,12 +208,7 @@ export class GalaxyCloud {
   private sparkleWarm = 2;
   private readonly near: NearGalaxy[] = [];
   private readonly eyes = GALAXIES.map(() => ({ x: 0, y: 0, z: 0 }));
-  /** The camera's speed, ly/s, smoothed; and where and when it was last. */
-  private speed = 0;
-  private lastCam = { x: 0, y: 0, z: 0, t: 0 };
-  /** How much the host is the on-screen march's because the camera is too fast for the sky map, smoothed. */
-  private fast = 0;
-  state = { direct: 0, mapped: 0, gain: 0, speed: 0 };
+  state = { mapped: 0, gain: 0 };
 
   constructor() {
     const n = GALAXIES.length;
@@ -240,13 +243,18 @@ export class GalaxyCloud {
     const billboards = new THREE.Mesh(geometry, this.field);
     billboards.frustumCulled = false;
     billboards.renderOrder = -4;
+    // (The galaxies around the camera are GalaxyHost's, on screen: any other view gets them as billboards.)
+    billboards.onBeforeRender = (_r, _s, camera) => {
+      this.field.uniforms.uNearWeight.value = camera === this.camera ? this.nearWeight : this.allWeight;
+      this.field.uniformsNeedUpdate = true;
+    };
     const large = new THREE.Mesh(geometry, this.fieldSoft);
     large.frustumCulled = false;
     large.layers.set(SOFT_LAYER);
     this.group.add(large);
-    this.volume.mesh.renderOrder = -3;
+    this.host.mesh.renderOrder = -3;
     this.home.mesh.renderOrder = -3;
-    this.group.add(billboards, this.volume.mesh, this.home.mesh);
+    this.group.add(billboards, this.host.mesh, this.home.mesh);
 
     this.sparkle = new THREE.ShaderMaterial({
       vertexShader: SPARKLE_VERT,
@@ -336,14 +344,24 @@ export class GalaxyCloud {
     const toC = new THREE.Vector3(frame.x - cam.x, frame.y - cam.y, frame.z - cam.z);
     const pole = new THREE.Vector3(a[3], a[4], a[5]);
     const centre = toC.addScaledVector(pole, -toC.dot(pole));
+    this.volume ??= new GalaxyVolume();
     const out = this.volume.panorama(list, centre, pole, width, passes);
     if (out) for (let i = 0; i < out.length; i++) if (i % 4 !== 3) out[i] *= INSIDE_GAIN;
     return out;
   }
 
-  /** cam: position in the universe (ly); gain: brightness of all galaxy light, 1 = as calibrated. */
-  update(cam: { x: number; y: number; z: number }, pixelsPerRadian: number, gain: number): void {
-    // The galaxies near enough for the sky map, nearest (in their own radii) first.
+  /** For measuring: the viewpoint the galaxy around the camera is drawn from (its own frame, ly), null if none. */
+  shownEye(): number[] | null {
+    return this.host.shownEye;
+  }
+
+  /**
+   * cam: position in the universe (ly); gain: brightness of all galaxy light, 1 = as calibrated; camera: the
+   * background camera, already turned and projected for this frame.
+   */
+  update(cam: { x: number; y: number; z: number }, pixelsPerRadian: number, gain: number, camera?: THREE.PerspectiveCamera): void {
+    if (camera) this.camera = camera;
+    // The galaxies near enough to be marched on screen, nearest (in their own radii) first.
     const near = this.near;
     near.length = 0;
     for (const g of GALAXIES) {
@@ -366,34 +384,13 @@ export class GalaxyCloud {
     gain *= THREE.MathUtils.lerp(INSIDE_GAIN, OUTSIDE_GAIN, out);
     // (Towards a galaxy's core the sky is many times brighter: the light meter turns the exposure down there.)
     const surveyed = this.home.update(host, pixelsPerRadian, this.survey ? HOME_GAIN : 0);
-    // Inside a galaxy, in its disc, above it and in its outskirts, it is the sky map's: one march of one model,
-    // so leaving the disc changes the perspective and nothing else. Only well outside, where the whole galaxy
-    // is in view and a march of its few layers on screen draws the same thing sharper, does that take over.
-    // (What the survey shows, the map leaves.)
-    // (Likewise high above the disc, where the whole of it is below the camera: the on-screen march moves with
-    // the camera every frame and is as sharp as the screen, where the map would trail it in steps.)
-    // And whenever the camera flies so fast that the sky map would fall behind it (it takes a fraction of a
-    // second to march): then the march on screen follows every frame. (Speeds up and down are smoothed over a
-    // second, so the hand-over is a fade, not a switch.)
-    const t = performance.now() / 1000, dtc = t - this.lastCam.t;
-    if (dtc > 0 && dtc < 0.5) {
-      const v = Math.hypot(cam.x - this.lastCam.x, cam.y - this.lastCam.y, cam.z - this.lastCam.z) / dtc;
-      this.speed += ((host && v > host.galaxy.radius * 2 ? 0 : v) - this.speed) * Math.min(1, dtc * 3);
-    }
-    this.lastCam = { x: cam.x, y: cam.y, z: cam.z, t };
-    // (Not inside the disc: there the march on screen sees far less of the dust and arms than the map, and the
-    // galaxy would fade as the camera speeds up. Inside it, the map keeps up by marching ahead of the camera.)
-    const tooFast = host
-      ? THREE.MathUtils.smoothstep(this.speed, host.galaxy.radius * 0.0125, host.galaxy.radius * 0.05) * THREE.MathUtils.smoothstep(Math.abs(host.eye.y), 1.5 * host.galaxy.height, 4 * host.galaxy.height)
-      : 0;
-    this.fast += (tooFast - this.fast) * Math.min(1, Math.max(dtc, 0) * 4);
-    const direct = host
-      ? Math.max(THREE.MathUtils.smoothstep(span(host), 1.5, 2.1), THREE.MathUtils.smoothstep(Math.abs(host.eye.y) / host.galaxy.radius, 0.25, 0.42), this.fast)
-      : 0;
-    const mapped = Math.max(0, 1 - direct - (this.survey ? HomeSky.cover(host) : 0));
-    /** (For measuring hand-overs: what draws the host, and how bright.) */
-    this.state = { direct, mapped, gain, speed: this.speed };
-    this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped, pixelsPerRadian, mapped);
+    // Inside a galaxy, above it, in its outskirts and outside it, it is one march of one model from where the
+    // camera is: leaving the disc changes the perspective and nothing else. (What the survey shows, it leaves.)
+    const mapped = Math.max(0, 1 - (this.survey ? HomeSky.cover(host) : 0));
+    /** (For measuring: how much of the host the march draws, and how bright.) */
+    this.state = { mapped, gain };
+    if (this.camera && mapped > 0.002) this.host.update(near, cam, this.camera, gain * mapped, pixelsPerRadian, mapped);
+    else this.host.update(NO_GALAXIES, cam, this.camera!, 0, pixelsPerRadian, 0);
 
     const f = this.field.uniforms;
     f.uCam.value.set(cam.x, cam.y, cam.z);
@@ -403,7 +400,7 @@ export class GalaxyCloud {
     f.uBrightness.value = gain;
     for (let i = 0; i < NEAR_GALAXIES; i++) {
       f.uNearId.value.setComponent(i, near[i] ? near[i].galaxy.id : -1);
-      f.uNearWeight.value.setComponent(i, near[i] ? 1 - near[i].weight * (i === 0 ? 1 - direct : mapped) : 0);
+      this.nearWeight.setComponent(i, near[i] ? 1 - near[i].weight : 0);
     }
     f.uHideClouds.value = host?.galaxy.id === 0 ? surveyed : 0;
 
