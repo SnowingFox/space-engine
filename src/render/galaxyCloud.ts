@@ -162,8 +162,8 @@ export class GalaxyCloud {
   readonly group = new THREE.Group();
   private readonly volume = new GalaxyVolume();
   private readonly home = new HomeSky();
-  /** Around the Sun, show the Milky Way as surveyed from Earth instead of the model. */
-  survey = true;
+  /** Around the Sun, show the Milky Way as surveyed from Earth instead of the model (off: every galaxy is the model). */
+  survey = false;
   private readonly field: THREE.ShaderMaterial;
   private readonly fieldSoft: THREE.ShaderMaterial;
   private readonly sparkle: THREE.ShaderMaterial;
@@ -291,7 +291,7 @@ export class GalaxyCloud {
         : 1;
     }
     const mapped = Math.max(0, 1 - direct - (this.survey ? HomeSky.cover(host) : 0));
-    this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped);
+    this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped, pixelsPerRadian);
 
     const f = this.field.uniforms;
     f.uCam.value.set(cam.x, cam.y, cam.z);

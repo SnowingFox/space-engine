@@ -93,7 +93,12 @@ const float LANE_LEAD = 0.16;
 
 // ro, rd: ray in the galaxy's frame; pixel: radians across one pixel, which limits the cloud detail.
 // Returns light (premultiplied) and how much of the background is hidden.
+// uSettle: 0 for a single look; 1 where many jittered passes are averaged, which may then resolve
+// detail finer than a step (it averages out instead of showing as grain). Unset, it is 0.
+uniform float uSettle;
 vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps, float jitter, float pixel) {
+  float stepLimit = mix(1.0, 30.0, uSettle);
+  float inLayer = 1.0 - smoothstep(1.0 * gA.z, 2.5 * gA.z, abs(ro.y));
   float R = gA.x * 1.2;
   float b = dot(ro, rd);
   float h2 = b * b - dot(ro, ro) + R * R;
@@ -111,8 +116,9 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
   }
   if (t1 <= t0) return vec4(0.0);
   float span = t1 - t0;
-  // From inside, steps start short, where nearby dust clouds need them, and grow with distance.
-  float a = mix(3.6, 0.4, clamp(t0 / (0.25 * gA.x), 0.0, 1.0));
+  // From inside, steps start short, where nearby dust clouds need them, and grow with distance:
+  // a few light years at first, a few per cent of the distance further out.
+  float a = t0 > 0.0 ? mix(3.6, 0.4, clamp(t0 / (0.25 * gA.x), 0.0, 1.0)) : clamp(log(span / (gA.z * 0.02)), 3.6, 11.0);
   float norm = 1.0 / (exp(a) - 1.0);
   float hd = gA.z * 0.12;       // dust hugs the plane
   float cell = gA.x * 0.022;    // size of the largest star clouds
@@ -153,7 +159,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       float arm = gArm(theta, r, gA, gB);
       // Far from the plane there are neither clouds nor dust to look up.
       float off = cross ? 0.0 : min(abs(ya), abs(yb));
-      float clouds = off < 4.0 * gA.z ? gfbm(p / cell + gC.w, min(clamp(2.2 * cell / reach, 1.0, 6.0), cell / (2.0 * pixel * tb))) : 0.5;
+      float clouds = off < 4.0 * gA.z ? gfbm(p / cell + gC.w, min(clamp(2.2 * cell / reach * stepLimit, 1.0, 64.0), cell / (2.0 * pixel * tb))) : 0.5;
       float edge = smoothstep(gA.x * 1.1, gA.x * 0.75, r);
       float radial = exp(-r / gA.y) * edge;
       float young = arm * smoothstep(0.05, 0.3, r / gA.x);
@@ -167,8 +173,12 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       born = vec3(0.52, 0.72, 1.1) * (newborn * blue * lit);
       if (off < 2.5 * gA.z && gB.w > 0.0) {
       // Detail finer than the step, or than a pixel, would only be grain.
-      float grain = min(knot / (2.0 * pixel * tb), 2.5 * knot / reachD);
-      float murk = gfbm(p / knot + gC.w + 3.1, clamp(grain, 1.0, 24.0));
+      float grain = min(knot / (2.0 * pixel * tb), 2.5 * knot / reachD * stepLimit);
+      // Interstellar clouds are filaments and sheets, not blobs: the noise is pulled along itself.
+      float warp = clamp(grain * 0.25 - 0.5, 0.0, 1.0);
+      vec3 q = p / knot + gC.w + 3.1;
+      q += warp * 1.4 * vec3(gnoise(q * 0.45 + 31.0) - 0.5, 0.0, gnoise(q * 0.45 + 57.0) - 0.5);
+      float murk = gfbm(q, clamp(grain, 1.0, 64.0));
       // Cloud complexes billow out of the dust layer here and there: the same dust, spread higher.
       // (Samples further apart than the clouds would only turn them into streaks: there the layer is even.)
       float puff = mix(0.45, gnoise(p / (cell * 0.7) + gC.w + 7.0), clamp(1.4 * cell / reachD - 1.0, 0.0, 1.0));
@@ -182,7 +192,12 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       born += vec3(1.0, 0.25, 0.4) * (discLum * radial * 2.5 * knots * gas);
       // Most of the dust sits in cloud complexes, opaque ones, with clearer space between them.
       // (From too far to tell them apart, they blend into the lanes along the arms.)
-      float dense = mix(0.4, smoothstep(0.3, 0.8, murk), clamp(grain * 0.5 - 0.8, 0.0, 1.0));
+      // Up close the clouds are opaque with clear gaps between them; a step that blurs many of them sees their average.
+      // (Real dust is that clumpy: most of the extinction near the Sun comes from a few dark clouds.)
+      // From inside the dust layer the nearest clouds are sharp-edged and opaque (a narrow threshold keeps
+      // their edges sharp at every scale the noise resolves); seen from above, the same clouds are soft.
+      float opaque = mix(smoothstep(0.3, 0.8, murk), 3.0 * smoothstep(0.56, 0.6, murk) * (0.5 + murk) + 0.04, inLayer);
+      float dense = mix(0.4, opaque, clamp(grain * 0.5 - 0.8, 0.0, 1.0));
       // It gathers in narrow lanes along the inner edges of the arms, which the star clouds push about.
       float lane = gLane(theta + LANE_LEAD + 0.5 * (clouds - 0.5) + 0.25 * sway, r, gA, gB);
       float ring = smoothstep(gA.x * 0.03, gA.x * 0.1, r) * edge;

@@ -40,7 +40,9 @@ uniform float uSize;
 uniform int uSteps;
 uniform float uPass;
 void main() {
-  vec2 uv = gl_FragCoord.xy / uSize * 2.0 - 1.0;
+  // Later passes also land anywhere inside their texel, so what is finer than a texel averages out smoothly.
+  vec2 sub = uSettle > 0.5 && uPass > 0.5 ? vec2(marchJitter(gl_FragCoord.xy + uPass * 5.0), marchJitter(gl_FragCoord.yx + uPass * 11.0)) - 0.5 : vec2(0.0);
+  vec2 uv = (gl_FragCoord.xy + sub) / uSize * 2.0 - 1.0;
   vec3 dir = normalize(uFaceF + uv.x * uFaceU + uv.y * uFaceV);
   // Rays sample at nearly the same distances, so each march step is a soft shell of cloud around the
   // camera rather than grain; each pass shifts the shells, and the passes average towards the true light.
@@ -69,9 +71,24 @@ uniform samplerCube uFrom;
 uniform samplerCube uTo;
 uniform float uMix;
 uniform float uGain;
+uniform float uGrain;   // pixels per radian, for the grain of unresolved stars
 varying vec3 vDir;
+
+float hash3(vec3 p) {
+  p = fract(p * vec3(443.897, 441.423, 437.195));
+  p += dot(p, p.yzx + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
 void main() {
-  gl_FragColor = mix(textureCube(uFrom, vDir), textureCube(uTo, vDir), uMix) * vec4(vec3(uGain), 1.0);
+  vec3 d = normalize(vDir);
+  vec4 c = mix(textureCube(uFrom, vDir), textureCube(uTo, vDir), uMix);
+  // The glow of a galaxy from inside is stars too faint to see one by one, but not so many that
+  // they blur into fog: a fine grain of them, a little coarser than the pixels.
+  vec3 cell = floor(d * uGrain * 1.4);
+  float s = hash3(cell);
+  float grain = 0.84 + 0.65 * s * s * s * s;
+  gl_FragColor = vec4(c.rgb * uGain * grain, c.a);
 }
 `;
 
@@ -111,8 +128,9 @@ interface Job {
   pass: number;
 }
 
-const DRAFT = { size: 512, steps: 30, strips: 2 };
-const FINE = { size: 1024, steps: 64, strips: 4, passes: 20 };
+// (Strips must divide the size: a fractional row would leave a seam unmarched.)
+const DRAFT = { size: 512, steps: 40, strips: 2 };
+const FINE = { size: 1024, steps: 160, strips: 8, passes: 24, show: 4 };
 
 function capture(near: NearGalaxy[]): View {
   const p = near[0];
@@ -166,7 +184,7 @@ export class GalaxyVolume {
         uWeight: { value: new Array(NEAR_GALAXIES).fill(0) },
         uCount: { value: 0 },
         uFaceU: { value: new THREE.Vector3() }, uFaceV: { value: new THREE.Vector3() }, uFaceF: { value: new THREE.Vector3() },
-        uSize: { value: 1 }, uSteps: { value: 1 }, uPass: { value: 0 }, uNoise: { value: galaxyNoise },
+        uSize: { value: 1 }, uSteps: { value: 1 }, uPass: { value: 0 }, uSettle: { value: 0 }, uNoise: { value: galaxyNoise },
       },
       blending: THREE.CustomBlending, blendSrc: THREE.ConstantAlphaFactor, blendDst: THREE.OneMinusConstantAlphaFactor,
       depthTest: false, depthWrite: false,
@@ -175,7 +193,7 @@ export class GalaxyVolume {
     this.sky = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
-      uniforms: { uFrom: { value: null }, uTo: { value: null }, uMix: { value: 1 }, uGain: { value: 1 } },
+      uniforms: { uFrom: { value: null }, uTo: { value: null }, uMix: { value: 1 }, uGain: { value: 1 }, uGrain: { value: 1000 } },
       side: THREE.BackSide, transparent: true, premultipliedAlpha: true, depthTest: false, depthWrite: false,
     });
     this.mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), this.sky);
@@ -188,7 +206,8 @@ export class GalaxyVolume {
   }
 
   /** near: the galaxies to draw, nearest first (at most NEAR_GALAXIES); brightness scales their light without a new march. */
-  update(near: NearGalaxy[], brightness: number): void {
+  update(near: NearGalaxy[], brightness: number, pixelsPerRadian = 1000): void {
+    this.sky.uniforms.uGrain.value = pixelsPerRadian;
     const renderer = probeRenderer();
     if (!renderer || near.length === 0) {
       this.mesh.visible = false;
@@ -266,6 +285,7 @@ export class GalaxyVolume {
     u.uSize.value = size;
     u.uSteps.value = job.steps;
     u.uPass.value = job.pass;
+    u.uSettle.value = job.target === this.fine ? 1 : 0;
     this.march.blendAlpha = 1 / (job.pass + 1);
     const rows = size / job.strips;
     job.target.scissorTest = true;
@@ -281,7 +301,8 @@ export class GalaxyVolume {
     if (++job.done < 6 * job.strips) return;
     this.job = null;
     if (job.target === this.fine) this.finePasses = job.pass + 1;
-    if (job.pass > 0) return;
+    // The fine map is noisy until a few passes are in: until then the draft stays up.
+    if (job.pass !== (job.target === this.fine ? FINE.show - 1 : 0)) return;
     this.sky.uniforms.uFrom.value = (this.shown ?? job.target).texture;
     this.sky.uniforms.uTo.value = job.target.texture;
     this.fade = this.shown ? 0 : 1;
