@@ -254,11 +254,14 @@ export class Pipeline {
     const floor = 0.8 / this.baseRatio;
     if (this.frameMs > 21 && this.resScale > floor) {
       // Dropping right after a step up means that step was too much: wait longer before trying again.
-      if (now - this.lastUp < 2500) this.upDelay = Math.min(this.upDelay * 2, 60000);
+      if (now - this.lastUp < 2500) this.upDelay = Math.min(this.upDelay * 2, 16000);
       this.resScale = Math.max(this.resScale * (this.frameMs > 30 ? 0.7 : 0.84), floor);
     } else if (this.resScale < 1 && now - this.fastSince > this.upDelay) {
       this.resScale = Math.min(this.resScale * 1.19, 1);
       this.lastUp = now;
+      // A step up that holds earns back some patience: a slow moment long ago (a heavy view since left)
+      // must not keep the resolution down for good.
+      this.upDelay = Math.max(this.upDelay / 2, 3000);
     } else {
       return;
     }
