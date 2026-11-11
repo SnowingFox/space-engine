@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { NEBULAE, type NebulaData } from '../universe/nebulae';
 import { temperatureToRgb } from '../universe/stars';
-import { BAKE_VERT, MAX_STARS, NEBULA_VERT, PARAM_SLOTS, nebulaFragment, nebulaNoise, type Family } from './nebulaShader';
+import { BAKE_VERT, MAX_GLOWS, MAX_PRIMS, MAX_STARS, NEBULA_VERT, PARAM_SLOTS, nebulaFragment, nebulaNoise, type Family } from './nebulaShader';
 
 // The nebulae of the catalogue, drawn in the background scene (light years, camera at the origin):
 //   tiny on screen       a soft spot carrying the nebula's light (measured from the model itself);
@@ -10,22 +10,29 @@ import { BAKE_VERT, MAX_STARS, NEBULA_VERT, PARAM_SLOTS, nebulaFragment, nebulaN
 // Their brightest stars are drawn as points, as the starfield draws its own.
 
 /**
- * Linear brightness of the Milky Way's glow on Sol's sky, the reference of NebulaData.brightness (measured in
- * the background target: 0.02 towards the anticentre, 0.025 in Cygnus, 0.045 in Sagittarius).
+ * Linear brightness (HDR frame, before exposure) of a surface of 21 mag/arcsec^2: the galaxies' scale
+ * (galaxyCloud.ts), from the starfield's magnitude law anchored on stars of magnitude 7, a patch of mu
+ * mag/arcsec^2 giving 729 x 10^(-0.4 (mu - 7)) per pixel, raised 2.6 times as the glow is; so a nebula and the
+ * Milky Way behind it compare as their published surface brightnesses do.
  */
-export const MW_GLOW = 0.03;
+export const SB21 = 729 * 2.6 * Math.pow(10, -0.4 * (21 - 7));
+/** Linear brightness of a surface of mu mag/arcsec^2. */
+export function surfaceBrightness(mu: number): number {
+  return SB21 * Math.pow(10, -0.4 * (mu - 21));
+}
 /**
- * Eye adaptation to a nebula that fills the view: the pipeline's meter never opens up beyond 1 in space and
- * ignores faint light, so a nebula seen from inside would stay as dim as a smudge on Sol's sky. Its light is
- * raised by up to this much as it grows from BIG_PX to filling the view (stars and galaxies are not).
+ * Dark adaptation: how far the exposure may open up when a nebula fills the view (the pipeline's meter ignores
+ * light this faint), and what its typical light is brought to.
  */
-const ADAPT = 1.8;
+const ADAPT_MAX = 64;
+const ADAPT_TARGET = 0.035;
 /** Radius on screen (device px) over which a nebula moves from the full-resolution pass to the reduced one. */
 const BIG_PX: [number, number] = [140, 240];
 /** Radius on screen (device px) over which the spot gives way to the march. */
 const SPOT_PX: [number, number] = [2.2, 4.5];
-/** Resolution of the reduced pass relative to the main target. */
+/** Resolution of the reduced pass relative to the main target, and the most pixels it gets. */
 const SOFT_SCALE = 0.5;
+const SOFT_MAX_PIXELS = 6e5;
 // A nebula the camera comes near is baked into a volume (emission and dust on a grid over its bounding cube):
 // marching that is a filtered fetch per step instead of the model's dozen, and only finer detail is added live.
 /** Grid of a baked volume, per side. */
@@ -143,12 +150,15 @@ interface Item {
   mean: [number, number, number] | null;
   /** Its peak (99.5th percentile of the luminance over the disc), at unit gain. */
   peak: number;
+  /** Its typical light: the median over the part of the disc brighter than a twentieth of the peak, at unit gain. */
+  typical: number;
   gain: number;
   starStart: number;
   bakeable: boolean;
   bakeMat: THREE.ShaderMaterial | null;
-  /** The reduced pass marching the baked volume instead of the model. */
+  /** The passes marching the baked volume instead of the model. */
   softBaked: THREE.ShaderMaterial | null;
+  fullBaked: THREE.ShaderMaterial | null;
   /** The volume it is baked into, and how many layers of it are done. */
   vol: Vol | null;
   layer: number;
@@ -183,6 +193,9 @@ export class Nebulae {
   gpuMs = 0;
   private timer: { ext: { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number }; query: WebGLQuery | null } | null | undefined;
   private warming = false;
+  private softScale = SOFT_SCALE;
+  /** How far the exposure should open up for the nebulae in view (1: not at all); for Pipeline.darkAdapt. */
+  adapt = 1;
   /** Overall brightness, for tuning. */
   gain = 1;
   /** Debug: scale of the step counts, and a switch for the whole layer. */
@@ -210,6 +223,21 @@ export class Nebulae {
       });
       const starTint = Array.from({ length: MAX_STARS }, (_, i) => new THREE.Vector3(...(n.stars[i] ? temperatureToRgb(n.stars[i].temp) : [0, 0, 0])));
       const p = Array.from({ length: PARAM_SLOTS }, (_, i) => new THREE.Vector4(...(n.look.p[i] ?? [0, 0, 0, 0])));
+      // Structures, the solids first (the shader draws the first uLiveN of them live).
+      const KIND = { cloud: 0, solid: 1, reflect: 2, bright: 3, cavity: 4 };
+      const prims = [...(n.look.prims ?? [])].sort((x, y) => Number(y.kind === 'solid') - Number(x.kind === 'solid')).slice(0, MAX_PRIMS);
+      const pr = Array.from({ length: MAX_PRIMS * 3 }, () => new THREE.Vector4());
+      prims.forEach((q, j) => {
+        pr[j * 3].set(...q.a, q.ra);
+        pr[j * 3 + 1].set(...(q.b ?? q.a), q.rb ?? q.ra);
+        pr[j * 3 + 2].set(q.density ?? 1, q.rough ?? 0.3, KIND[q.kind], q.glow ?? 1);
+      });
+      const live = Math.min(prims.filter((q) => q.kind === 'solid').length, 6);
+      const gl = Array.from({ length: MAX_GLOWS * 2 }, () => new THREE.Vector4());
+      (n.look.glows ?? []).slice(0, MAX_GLOWS).forEach((g, i) => {
+        gl[i * 2].set(...g.at, g.sigma);
+        gl[i * 2 + 1].set(...g.color, g.amount);
+      });
       const focus = family === 'hii' && n.stars.length ? new THREE.Vector4(star[0].x, star[0].y, star[0].z, 0.12)
         : family === 'pn' ? new THREE.Vector4(0, 0, 0, 0.35) : new THREE.Vector4(0, 0, 0, 50);
       const uniforms: Record<string, THREE.IUniform> = {
@@ -219,6 +247,8 @@ export class Nebulae {
         uScale: { value: new THREE.Vector3(...n.look.scale) }, uSeed: { value: n.look.seed }, uVariant: { value: n.look.variant },
         uP: { value: p }, uStar: { value: star }, uStarCol: { value: starTint }, uStarN: { value: Math.min(n.stars.length, MAX_STARS) },
         uFocus: { value: focus }, uDust: { value: 1 },
+        uPr: { value: pr }, uPrN: { value: prims.length }, uLiveN: { value: live },
+        uGlow: { value: gl }, uGlowN: { value: Math.min(n.look.glows?.length ?? 0, MAX_GLOWS) },
       };
       const make = (): THREE.ShaderMaterial => new THREE.ShaderMaterial({
         vertexShader: NEBULA_VERT, fragmentShader: nebulaFragment(family),
@@ -232,12 +262,13 @@ export class Nebulae {
         uniforms: { ...uniforms, uLayer: { value: 0 }, uN: { value: BAKE_N } },
         blending: THREE.NoBlending, depthTest: false, depthWrite: false, toneMapped: false,
       }) : null;
-      const softBaked = bakeable ? new THREE.ShaderMaterial({
+      const bakedOf = (m: THREE.ShaderMaterial): THREE.ShaderMaterial | null => bakeable ? new THREE.ShaderMaterial({
         vertexShader: NEBULA_VERT, fragmentShader: nebulaFragment(family, 'baked'),
-        uniforms: { ...uniforms, uSteps: softMat.uniforms.uSteps, uPixel: softMat.uniforms.uPixel, uWeight: softMat.uniforms.uWeight,
+        uniforms: { ...uniforms, uSteps: m.uniforms.uSteps, uPixel: m.uniforms.uPixel, uWeight: m.uniforms.uWeight,
           uVol: { value: this.noVol }, uVoxel: { value: 2 / BAKE_N } },
         transparent: true, premultipliedAlpha: true, depthTest: false, depthWrite: false, toneMapped: false,
       }) : null;
+      const softBaked = bakedOf(softMat), fullBaked = bakedOf(fullMat);
       const full = new THREE.Mesh(quad, fullMat);
       const soft = new THREE.Mesh(quad, softMat);
       for (const m of [full, soft]) {
@@ -249,7 +280,7 @@ export class Nebulae {
       full.renderOrder = -2.5;
       this.group.add(full);
       this.softScene.add(soft);
-      this.items.push({ n, uniforms, full, soft, fullMat, softMat, mean: null, peak: 0, gain: 0, starStart: starLum.length, bakeable, bakeMat, softBaked, vol: null, layer: 0 });
+      this.items.push({ n, uniforms, full, soft, fullMat, softMat, mean: null, peak: 0, typical: 0, gain: 0, starStart: starLum.length, bakeable, bakeMat, softBaked, fullBaked, vol: null, layer: 0 });
       for (const s of n.stars) {
         // The light the eye sees: luminosity less the bolometric correction.
         starLum.push(s.lum * Math.pow(10, 0.4 * bolometricCorrection(s.temp)));
@@ -327,7 +358,7 @@ export class Nebulae {
     // And the baking and baked programs, one stand-in each.
     const extra = new THREE.Scene();
     for (const it of this.items) {
-      for (const m of [it.bakeMat, it.softBaked]) {
+      for (const m of [it.bakeMat, it.softBaked, it.fullBaked]) {
         if (!m) continue;
         const mesh = new THREE.Mesh(this.bakeQuad.geometry, m);
         mesh.frustumCulled = false;
@@ -356,8 +387,12 @@ export class Nebulae {
       const s = n.sight;
       const D = 4 * n.radius;
       const camPos = { x: n.x + s[6] * D, y: n.y + s[7] * D, z: n.z + s[8] * D };
-      this.setFrame(it, camPos);
-      const u = it.fullMat.uniforms;
+      // (On a copy of the material: frames are drawn between the reads, with the shared uniforms as they need them.)
+      const mat = it.fullMat.clone();
+      const u = mat.uniforms;
+      // (Not a copy of the noise: the one already on the GPU.)
+      u.uNoise.value = nebulaNoise;
+      this.setFrame(it, camPos, u);
       u.uSteps.value = 64;
       u.uPixel.value = fov / size;
       u.uWeight.value = 1;
@@ -365,7 +400,7 @@ export class Nebulae {
       cam.position.set(0, 0, 0);
       cam.lookAt(v.set(-s[6], -s[7], -s[8]));
       cam.updateMatrixWorld();
-      const mesh = new THREE.Mesh(it.full.geometry, it.fullMat);
+      const mesh = new THREE.Mesh(it.full.geometry, mat);
       mesh.frustumCulled = false;
       scene.add(mesh);
       renderer.setRenderTarget(rt);
@@ -373,6 +408,7 @@ export class Nebulae {
       renderer.clear();
       renderer.render(scene, cam);
       scene.remove(mesh);
+      mat.dispose();
       await renderer.readRenderTargetPixelsAsync(rt, 0, 0, size, size, pix);
       const sum = [0, 0, 0];
       const pixel = (fov / size) ** 2;
@@ -383,24 +419,26 @@ export class Nebulae {
       }
       lum.sort((x, y) => x - y);
       it.peak = lum[Math.floor(lum.length * 0.995)];
+      const lit = lum.filter((v) => v > it.peak * 0.05);
+      it.typical = lit.length ? lit[Math.floor(lit.length * 0.5)] : it.peak;
       const disc = 2 * Math.PI * (1 - Math.cos(half));
       it.mean = [sum[0] * pixel / disc, sum[1] * pixel / disc, sum[2] * pixel / disc];
     }
     renderer.setRenderTarget(prev);
     renderer.setClearColor(0x000000, clear);
     rt.dispose();
-    // Calibrated on the peak: brightness is how many times the Milky Way's glow its brightest parts reach.
-    // As seen from Sol, through the dust in front (the published extinction); nearer, there is less of it.
-    for (const it of this.items) it.gain = it.peak > 0 ? (it.n.brightness * MW_GLOW) / (it.peak * Math.pow(10, -0.4 * it.n.av)) : 0;
+    // Calibrated on the peak, to the published surface brightness as seen from Sol, through the dust in front
+    // (the published extinction); nearer, there is less of it.
+    for (const it of this.items) it.gain = it.peak > 0 ? surfaceBrightness(it.n.sb) / (it.peak * Math.pow(10, -0.4 * it.n.av)) : 0;
     this.ready = true;
   }
 
   /** Shape-frame uniforms for a camera at `cam` (universe, ly). */
-  private setFrame(it: Item, cam: { x: number; y: number; z: number }): void {
+  private setFrame(it: Item, cam: { x: number; y: number; z: number }, u: Record<string, THREE.IUniform> = it.uniforms): void {
     const n = it.n, a = n.axes;
     const rx = n.x - cam.x, ry = n.y - cam.y, rz = n.z - cam.z;
-    (it.uniforms.uRel.value as THREE.Vector3).set(rx, ry, rz);
-    (it.uniforms.uEye.value as THREE.Vector3).set(
+    (u.uRel.value as THREE.Vector3).set(rx, ry, rz);
+    (u.uEye.value as THREE.Vector3).set(
       -(a[0] * rx + a[1] * ry + a[2] * rz) / n.radius,
       -(a[3] * rx + a[4] * ry + a[5] * rz) / n.radius,
       -(a[6] * rx + a[7] * ry + a[8] * rz) / n.radius,
@@ -426,6 +464,8 @@ export class Nebulae {
     const sc = this.spots.geometry.getAttribute('aColor') as THREE.BufferAttribute;
     const ss = this.spots.geometry.getAttribute('aSize') as THREE.BufferAttribute;
     let anySoft = false;
+    let adapt = 1;
+    let bigOnScreen = 0;
     for (const it of this.items) {
       const n = it.n;
       const rx = n.x - cam.x, ry = n.y - cam.y, rz = n.z - cam.z;
@@ -437,9 +477,16 @@ export class Nebulae {
       const inView = inside || off - ang < edge + 0.01;
       // Interstellar dust between the camera and the nebula: all of it from Sol, less from nearer.
       const av = n.av * Math.min(d / n.dist, 1);
-      const ext = [0.8, 1.0, 1.28].map((c) => Math.pow(10, -0.4 * av * c));
-      const adapt = 1 + (ADAPT - 1) * (inside ? 1 : THREE.MathUtils.smoothstep(px, BIG_PX[0], 1400));
-      const g = it.gain * this.gain * adapt;
+      // (Its colour as in a photograph balanced for the dust: only part of the reddening is kept.)
+      const ext = [0.97, 1.0, 1.04].map((c) => Math.pow(10, -0.4 * av * c));
+      const g = it.gain * this.gain;
+      // The eye opens up to a nebula as it comes to fill the view, until its typical light reads as a night scene.
+      if (inView && it.typical > 0) {
+        const cover = inside ? 1 : Math.min(1, (ang / edge) ** 2);
+        const light = it.typical * g * (0.2126 * ext[0] + 0.7152 * ext[1] + 0.0722 * ext[2]);
+        const want = THREE.MathUtils.clamp(ADAPT_TARGET / Math.max(light, 1e-9), 1, ADAPT_MAX);
+        adapt = Math.max(adapt, 1 + (want - 1) * THREE.MathUtils.smoothstep(cover, 0.1, 0.6));
+      }
       const spotW = 1 - THREE.MathUtils.smoothstep(px, SPOT_PX[0], SPOT_PX[1]);
       const marchW = this.ready && inView && this.enabled ? 1 - spotW : 0;
       const big = inside ? 1 : THREE.MathUtils.smoothstep(px, BIG_PX[0], BIG_PX[1]);
@@ -456,16 +503,18 @@ export class Nebulae {
         const u = it.fullMat.uniforms;
         u.uWeight.value = wFull;
         u.uPixel.value = 1 / pixelsPerRadian;
-        u.uSteps.value = Math.round(THREE.MathUtils.clamp(20 + px * 0.1, 24, 48) * this.stepScale);
+        u.uSteps.value = Math.round(THREE.MathUtils.clamp(20 + px * 0.1, 24, 48) * (it.full.material === it.fullBaked ? 1.5 : 1) * this.stepScale);
       }
       if (it.soft.visible) {
         anySoft = true;
         const u = it.softMat.uniforms;
         u.uWeight.value = wSoft;
-        u.uPixel.value = 1 / (pixelsPerRadian * SOFT_SCALE);
+        u.uPixel.value = 1 / (pixelsPerRadian * this.softScale);
         // Marching the baked volume is cheap: more steps, less grain.
+        // Marching the baked volume is cheap; the model itself (until its volume is baked) is not: fewer steps.
         const baked = it.soft.material === it.softBaked;
-        u.uSteps.value = Math.round((inside ? 64 : 56) * (baked ? 1.5 : 1) * this.stepScale);
+        u.uSteps.value = Math.round((baked ? (inside ? 72 : 64) : it.softBaked ? 28 : 56) * this.stepScale);
+        bigOnScreen = Math.max(bigOnScreen, inside ? 1 : Math.min(1, (ang / edge) ** 2));
       }
       // The spot: the same light, gathered.
       const i = n.id;
@@ -483,8 +532,15 @@ export class Nebulae {
     sp.needsUpdate = sc.needsUpdate = ss.needsUpdate = true;
     this.spots.visible = true;
 
-    if (this.ready) this.bake(cam, renderer);
-    for (const it of this.items) if (it.softBaked) it.soft.material = !this.noBake && it.vol && it.layer >= BAKE_N ? it.softBaked : it.softMat;
+    // (Faster when a nebula fills the view and its model is being marched meanwhile.)
+    if (this.ready) this.bake(cam, renderer, bigOnScreen > 0.3 ? BAKE_LAYERS * 4 : BAKE_LAYERS);
+    for (const it of this.items) {
+      if (!it.softBaked || !it.fullBaked) continue;
+      const done = !this.noBake && !!it.vol && it.layer >= BAKE_N;
+      it.soft.material = done ? it.softBaked : it.softMat;
+      it.full.material = done ? it.fullBaked : it.fullMat;
+    }
+    this.adapt = adapt;
 
     // Stars, camera-relative in doubles.
     const pos = this.stars.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -495,8 +551,10 @@ export class Nebulae {
     // The reduced pass, drawn now into its own target; the composite lays it over the sky.
     this.composite.visible = anySoft;
     if (anySoft) {
-      const w = Math.max(1, Math.round(window.innerWidth * pixelRatio * SOFT_SCALE));
-      const h = Math.max(1, Math.round(window.innerHeight * pixelRatio * SOFT_SCALE));
+      const scale = Math.min(SOFT_SCALE, Math.sqrt(SOFT_MAX_PIXELS / (window.innerWidth * window.innerHeight)) / pixelRatio);
+      const w = Math.max(1, Math.round(window.innerWidth * pixelRatio * scale));
+      const h = Math.max(1, Math.round(window.innerHeight * pixelRatio * scale));
+      this.softScale = scale;
       if (this.target.width !== w || this.target.height !== h) this.target.setSize(w, h);
       (this.composite.material as THREE.ShaderMaterial).uniforms.uSize.value.set(w, h);
       const prev = renderer.getRenderTarget();
@@ -531,7 +589,7 @@ export class Nebulae {
   }
 
   /** Bake the nearest nebulae into volumes, a few layers per frame; their reduced pass marches the volume once done. */
-  private bake(cam: { x: number; y: number; z: number }, renderer: THREE.WebGLRenderer): void {
+  private bake(cam: { x: number; y: number; z: number }, renderer: THREE.WebGLRenderer, layers: number): void {
     const span = (it: Item): number => Math.hypot(it.n.x - cam.x, it.n.y - cam.y, it.n.z - cam.z) / it.n.radius;
     const want = this.items.filter((it) => it.bakeable && span(it) < BAKE_REACH).sort((a, b) => span(a) - span(b)).slice(0, BAKE_SLOTS);
     for (const it of want) {
@@ -548,19 +606,17 @@ export class Nebulae {
       if (vol.owner) {
         // Taken from a nebula now further away: it goes back to marching the model.
         vol.owner.vol = null;
-        vol.owner.soft.material = vol.owner.softMat;
       }
       vol.owner = it;
       it.vol = vol;
       it.layer = 0;
-      it.soft.material = it.softMat;
     }
     const job = want.find((it) => it.vol && it.layer < BAKE_N);
     if (!job) return;
     const prev = renderer.getRenderTarget();
     this.bakeQuad.material = job.bakeMat!;
     const u = job.bakeMat!.uniforms;
-    for (let i = 0; i < BAKE_LAYERS && job.layer < BAKE_N; i++, job.layer++) {
+    for (let i = 0; i < layers && job.layer < BAKE_N; i++, job.layer++) {
       u.uLayer.value = job.layer;
       renderer.setRenderTarget(job.vol!.rt, job.layer);
       renderer.render(this.bakeScene, this.bakeCam);
@@ -568,7 +624,7 @@ export class Nebulae {
     renderer.setRenderTarget(prev);
     if (job.layer >= BAKE_N) {
       job.softBaked!.uniforms.uVol.value = job.vol!.rt.texture;
-      job.soft.material = job.softBaked!;
+      job.fullBaked!.uniforms.uVol.value = job.vol!.rt.texture;
     }
   }
 

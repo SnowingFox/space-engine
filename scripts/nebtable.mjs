@@ -24,15 +24,18 @@ const rows = await page.evaluate(`(async () => {
     p.quat.setFromUnitVectors(p.local.clone().set(0, 0, -1), v);
     const ang = Math.asin(n.radius / d);
     const H = pl.bgTarget.height, R = Math.min(120, H / 2.4);
-    se.settings.fov = 2 * Math.atan(ang * H / (2 * R)) * 180 / Math.PI;
+    se.settings.fov = 2 * Math.atan(ang * H / (2 * R)) * 180 / Math.PI; se.pipeline.autoExposure = false;
     se.nebulae.enabled = true; await wait(1800); const on = read(R);
     se.nebulae.enabled = false; await wait(900); const off = read(R);
     const diff = on.map((x, i) => Math.max(x - off[i], 0));
-    out.push([n.name, 2 * Math.atan(n.radius / n.dist) * 180 / Math.PI * 60, pct(diff, 0.995), pct(off, 0.5), n.brightness]);
+    out.push([n.name, 2 * Math.atan(n.radius / n.dist) * 180 / Math.PI * 60, pct(diff, 0.995), pct(off, 0.5), n.sb]);
   }
   se.nebulae.enabled = true;
   return out;
 })()`);
-console.log('nebula | model diameter (arcmin) | peak (linear) | Milky Way behind it (median, linear) | peak / glow behind | peak / MW_GLOW 0.03');
-for (const [name, size, peak, mw] of rows) console.log(`${name} | ${size.toFixed(1)} | ${peak.toFixed(4)} | ${mw.toFixed(4)} | ${(peak / mw).toFixed(2)} | ${(peak / 0.03).toFixed(2)}`);
+// Linear frame values to mag/arcsec^2 with the zero point of render/nebulae.ts (SB21: 21 mag/arcsec^2).
+const SB21 = 729 * 2.6 * Math.pow(10, -0.4 * 14);
+const mu = (v) => (v > 0 ? 21 - 2.5 * Math.log10(v / SB21) : Infinity);
+console.log('nebula | model diameter (arcmin) | published peak (mag/arcsec^2) | model peak | Milky Way behind it (median) | peak / glow behind');
+for (const [name, size, peak, mw, sb] of rows) console.log(`${name} | ${size.toFixed(1)} | ${sb.toFixed(1)} | ${mu(peak).toFixed(1)} | ${mu(mw).toFixed(1)} | ${(peak / mw).toFixed(2)}`);
 await browser.close();

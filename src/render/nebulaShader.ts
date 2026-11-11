@@ -37,7 +37,10 @@ function makeNoise(): THREE.Data3DTexture {
 export const nebulaNoise = makeNoise();
 
 export const MAX_STARS = 9;
-export const PARAM_SLOTS = 15;
+export const PARAM_SLOTS = 6;
+/** Structures of an H II region (clouds, pillars, cavities...), and analytic glows. */
+export const MAX_PRIMS = 16;
+export const MAX_GLOWS = 4;
 
 export const NEBULA_VERT = /* glsl */ `
 uniform vec3 uRel;      // centre relative to the camera, ly
@@ -90,8 +93,10 @@ vec3 gRd;   // the ray, in the nebula's frame
 vec3 gL;    // light gathered along it
 vec3 gT;    // and how much of what is behind still comes through
 
-const vec3 C_HA = vec3(1.0, 0.11, 0.26);      // H-alpha with H-beta
-const vec3 C_RED = vec3(1.0, 0.06, 0.07);     // H-alpha and [N II]
+const vec3 C_HA = vec3(1.0, 0.13, 0.30);      // H-alpha with H-beta (about 1 / 2.9 of it): the pink of ionised hydrogen
+const vec3 C_RED = vec3(1.0, 0.05, 0.06);     // H-alpha and [N II], where the ionisation is low
+const vec3 C_BROWN = vec3(0.55, 0.30, 0.16);  // dust lit by the nebula's own red light
+const vec3 C_RIM = vec3(1.0, 0.24, 0.36);     // ionisation fronts on dense gas: H-alpha, with [O III] and scattered starlight
 const vec3 C_OIII = vec3(0.06, 1.0, 0.74);    // [O III] 496/501 nm
 const vec3 C_HEII = vec3(0.32, 0.5, 1.0);
 const vec3 C_SYNC = vec3(0.52, 0.7, 1.0);
@@ -148,25 +153,72 @@ float gauss(float x, float w) {
 `;
 
 const HII = /* glsl */ `
-// The neutral parts: the molecular cloud a blister is cut into, and pillars (capsules).
-float gCloud;   // the cloud's share of the last neutralGas()
-float neutralGas(vec3 q, float r, float g) {
+// Per region (shape frame, lengths in radii):
+//   uP[0] = cavity radius, cavity softness, outer radius, concentration towards the main star
+//   uP[1] = dust, [O III], scattered starlight (blue), ionising power
+//   uP[2] = warp, noise frequency, density contrast (log-normal sigma), stretch along the stars' rays
+//   uP[3] = molecular cloud behind the region: normal xyz (out of the cloud), offset
+//   uP[4] = its curvature (positive: a bowl around the stars), density, softness, glow of its lit face
+//   uP[5] = filaments, opening towards the poles (Z), 1: a sheet seen face on (IC 434), dust lit by the nebula
+// Structures, three vec4 each: (a.xyz, ra), (b.xyz, rb), (density, roughness, kind, glow): a round cone from a to b.
+//   kind 0: dark cloud (neutral, dusty, its face lit by the stars, as brightly as 'glow'); 1: solid (a pillar or
+//   globule, sharp, drawn live, see solids()); 2: reflection cloud (dust scattering the stars' blue light);
+//   3: a brighter part of the ionised gas; 4: a cavity cleared of gas.
+uniform vec4 uPr[${MAX_PRIMS * 3}];
+uniform int uPrN;
+uniform int uLiveN;   // the first uLiveN structures are the solids
+
+// Distance to a round cone (a sphere of radius ra at a, rb at b, and the cone tangent to both).
+float roundCone(vec3 p, vec3 a, vec3 b, float ra, float rb) {
+  vec3 ba = b - a;
+  float l2 = dot(ba, ba);
+  if (l2 < 1e-8) return length(p - a) - ra;
+  float rr = ra - rb, a2 = l2 - rr * rr, il2 = 1.0 / l2;
+  vec3 pa = p - a;
+  float y = dot(pa, ba), z = y - l2;
+  vec3 xv = pa * l2 - ba * y;
+  float x2 = dot(xv, xv), y2 = y * y * l2, z2 = z * z * l2;
+  float k = sign(rr) * rr * rr * x2;
+  if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - rb;
+  if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - ra;
+  return (sqrt(x2 * a2 * il2) + y * rr) * il2 - ra;
+}
+
+// Fill of structure j at p: 0 outside, 1 well inside, its edge roughened by noise.
+float primFill(int j, vec3 p, float rough) {
+  vec4 A = uPr[j * 3], B = uPr[j * 3 + 1], C = uPr[j * 3 + 2];
+  float d = roundCone(p, A.xyz, B.xyz, A.w, B.w);
+  float size = max(A.w, B.w);
+  if (d > size * (0.5 + 1.2 * C.y)) return 0.0;
+  if (rough > 0.0) d += rough * size * 1.6 * ((n4(p / (size * 0.6) + float(j) * 7.3 + uSeed).x - 0.5) + 0.5 * (n4(p / (size * 0.22) + float(j) * 3.1).y - 0.5));
+  return smoothstep(size * 0.2, -size * 0.2, d);
+}
+
+float gCloud;   // the molecular cloud's share of the last neutralGas()
+float gGlow;    // how brightly the dark clouds there glow where lit
+// Neutral (dusty) gas at p: the molecular cloud and the dark clouds; for shadows (shadow = true), the solids too.
+float neutralGas(vec3 p, bool shadow) {
+  vec3 q = p / uScale;
   vec3 cn = uP[3].xyz;
   float along = dot(q, cn);
   vec3 across = q - cn * along;
-  float h = along - uP[3].w + uP[4].x * dot(across, across);
-  // (Faded well inside the bounding sphere, so it never shows the sphere's outline.)
-  float cloud = uP[4].y * smoothstep(uP[4].z, -uP[4].z, h + 0.12 * (g - 0.5)) * (1.0 - smoothstep(uVariant == 3 ? 0.4 : 0.7, 0.95, r));
+  float h = along - uP[3].w - uP[4].x * dot(across, across);
+  // (Faded out well inside the bounding sphere, raggedly: its edge must never show as a circle.)
+  float edgeN = n4(q * 2.3 + uSeed * 0.7).w - 0.5;
+  float cloud = uP[4].y * smoothstep(uP[4].z, -uP[4].z, h) * (1.0 - smoothstep(0.3, 0.9, length(q) + 0.35 * edgeN));
   gCloud = cloud;
-  for (int j = 0; j < 3; j++) {
-    vec4 a = uP[8 + j * 2], b = uP[9 + j * 2];
-    if (a.w <= 0.0) continue;
-    vec3 ab = b.xyz - a.xyz;
-    float t = clamp(dot(q - a.xyz, ab) / dot(ab, ab), 0.0, 1.0);
-    // Thicker at the base, a knob at the head.
-    float rad = a.w * (1.15 - 0.35 * t) * (0.75 + 0.6 * g);
-    float sd = length(q - a.xyz - ab * t) - rad;
-    cloud += b.w * smoothstep(rad * 0.35, -rad * 0.35, sd);
+  gGlow = 1.0;
+  // (Dark clouds belong to the region: they thin out towards its edge rather than run on across the sky.)
+  float inside = 1.0 - smoothstep(0.35, 0.92, length(q) + 0.35 * edgeN);
+  for (int j = 0; j < ${MAX_PRIMS}; j++) {
+    if (j >= uPrN) break;
+    vec4 C = uPr[j * 3 + 2];
+    int kind = int(C.z + 0.5);
+    if (kind == 0 || (shadow && kind == 1)) {
+      float f = primFill(j, p, shadow ? 0.0 : C.y);
+      cloud += C.x * f * (kind == 0 ? inside : 1.0);
+      if (f > 0.05 && kind == 0) gGlow = min(gGlow, C.w);
+    }
   }
   return cloud;
 }
@@ -180,12 +232,8 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   vec3 qw = q + (w.xyz + 0.45 * w2.xyz) * uP[2].x;
   // A ragged outline: the edge of the nebula wanders in and out by a large-scale field.
   float r = length(qw) / (0.95 + 0.45 * w.w);
-  // Outside the gas and the cloud there is nothing to do (most of the steps through a bubble's cavity
-  // and around the outline): the expensive part below is skipped.
-  float outer = uVariant == 3 ? gauss(q.z + 0.2 * w.w, 0.3) * (1.0 - smoothstep(0.3, 1.0, r)) : 1.0 - smoothstep(uP[0].w * 0.35, uP[0].w, r);
   e = vec3(0.0);
   k = vec3(0.0);
-  if (outer < 0.004 && neutralGas(qw, length(qw), 0.5) < 0.01) return;
 
   // Starlight: inverse square from every star.
   float flux = 0.0;
@@ -197,76 +245,155 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   vec3 d0 = uStar[0].xyz - p;
   float r0 = length(d0);
   vec3 radial = d0 / max(r0, 1e-4);
-  // Gas is pushed and shadowed along the rays from the stars: structure stretched along them (pillars, trunks).
+  float env;
+  if (uP[5].z > 0.5) {
+    // A sheet of gas seen nearly face on (IC 434 behind the Horsehead), densest at the edge of the cloud,
+    // where the gas boils off it into the starlight.
+    float side = dot(qw, uP[3].xyz) - uP[3].w;
+    env = 2.5 * gauss(q.z + 0.22 + 0.2 * w.w, 0.2) * (1.0 - smoothstep(0.3, 0.95, r)) * (0.6 + 1.2 * exp(-max(side, 0.0) * 4.0)) * smoothstep(-0.12, 0.04, side);
+  } else {
+    // (The cavity is measured without the ragged outline's stretch, so it stays round and clear.)
+    float rc = length(qw);
+    env = smoothstep(uP[0].x - uP[0].y, uP[0].x + uP[0].y, rc) * (1.0 - smoothstep(uP[0].z * 0.35, uP[0].z, r));
+    // A bubble blown by the cluster's winds: the swept-up gas is densest at its inner wall.
+    if (uP[0].x > 0.05) env *= 0.45 + 2.6 * exp(-max(rc - uP[0].x, 0.0) * 6.0);
+    // Some are rings rather than bubbles, open towards the poles.
+    env *= 1.0 - uP[5].y * smoothstep(0.45, 0.85, abs(qw.z) / max(rc, 1e-3));
+  }
+  // Denser towards the stars that formed in it, and densest around the main star.
+  // (On the emission measure, n^2, so a square root on the density.)
+  env *= sqrt((1.0 + uP[0].w * exp(-r0 * 6.0)) / (1.0 + 1.2 * r0 * r0));
+  // Brighter parts, and cavities.
+  for (int j = 0; j < ${MAX_PRIMS}; j++) {
+    if (j >= uPrN) break;
+    vec4 C = uPr[j * 3 + 2];
+    int kind = int(C.z + 0.5);
+    if (kind == 3) env *= 1.0 + C.x * primFill(j, qw * uScale, C.y);
+    else if (kind == 4) env *= 1.0 - C.x * primFill(j, p, C.y);
+  }
+  float neuHere = neutralGas(p, false);
+  float refl = 0.0;
+  for (int j = 0; j < ${MAX_PRIMS}; j++) {
+    if (j >= uPrN) break;
+    vec4 C = uPr[j * 3 + 2];
+    if (int(C.z + 0.5) == 2) refl += C.x * primFill(j, p, C.y);
+  }
+  // Nothing here (a cavity, beyond the outline): the rest is skipped.
+  if (env < 0.002 && neuHere < 0.005 && refl < 0.005) return;
+  // Gas is pushed and shadowed along the rays from the stars: structure stretched along them.
   vec3 qs = qw + radial * dot(qw, radial) * uP[2].w * 1.5;
   vec4 G = fbm4(qs * freq + uSeed * 1.7, octaves(fp, freq, 6.5));
   // About unit variance; the log-normal's tail is cut at 3 sigma (beyond, one pixel can overflow a half float).
   vec4 Z = clamp((G - 0.5) * 10.0, -3.0, 3.0);
-
-  float env;
-  if (uVariant == 3) {
-    // A sheet of gas seen nearly face on (IC 434 behind the Horsehead), densest at the edge of the cloud,
-    // where the gas boils off it into the starlight.
-    float side = dot(qw, uP[3].xyz) - uP[3].w;
-    env = gauss(q.z + 0.2 * w.w, 0.3) * (1.0 - smoothstep(0.3, 0.95, r)) * (0.25 + 1.6 * exp(-max(side, 0.0) * 5.0)) * smoothstep(-0.08, 0.02, side);
-  } else {
-    // (The cavity is measured without the ragged outline's stretch, so it stays round and clear.)
-    float rc = length(qw);
-    env = smoothstep(uP[0].x - uP[0].y, uP[0].x + uP[0].y, rc) * (1.0 - smoothstep(uP[0].w * 0.35, uP[0].w, r));
-    // A bubble blown by the cluster's winds: the swept-up gas is densest at its inner wall.
-    if (uP[0].x > 0.05) env *= 0.6 + 2.2 * exp(-max(rc - uP[0].x, 0.0) * 5.0);
-    // Some are rings rather than bubbles, open towards the poles (uP[14].x; the pole is Z).
-    env *= 1.0 - uP[14].x * smoothstep(0.45, 0.85, abs(qw.z) / max(rc, 1e-3));
-  }
-  // Denser towards the stars that formed in it, and densest in the core around the main star.
-  // (On the emission measure, n^2, so a square root on the density.)
-  env *= sqrt((1.0 + uP[0].z * exp(-r0 * 6.0)) / (1.0 + 1.2 * r0 * r0));
+  refl *= exp(0.9 * Z.x);
   // Turbulent ionised gas: log-normal clouds, and thin sheets swept up by shocks (filaments, seen edge on).
   float sigma = uP[2].z;
   float gas = env * exp(sigma * Z.x - 0.5 * sigma * sigma);
-  float wisp = env * gauss(Z.y, 0.3) * exp(0.6 * Z.x);
-  float n = 0.7 * gas + 1.6 * wisp;
-  // Neutral gas, which carries the dust: the molecular cloud, pillars, and globules where the third field peaks.
+  float wisp = env * gauss(Z.y, 0.28) * exp(0.7 * Z.x);
+  float n = 0.6 * gas + uP[5].x * wisp;
+  // Neutral gas, which carries the dust: the molecular cloud and dark clouds, and globules where the third field peaks.
   float clump = 0.5 + 0.5 * exp(0.7 * Z.x);
-  float neu = neutralGas(qw, length(qw), G.x) * clump + env * smoothstep(1.1, 1.35, Z.z + 0.25 * Z.y) * 3.5;
-  // How brightly the cloud's face glows when lit (0: it only scatters starlight, as the Trifid's northern cloud).
-  float faceGlow = mix(1.0, uP[4].w, clamp(gCloud * clump / max(neu, 1e-4), 0.0, 1.0));
+  float faceGlow = mix(1.0, uP[4].w, clamp(gCloud / max(neuHere, 1e-4), 0.0, 1.0)) * gGlow;
+  float neu = neuHere * clump + env * smoothstep(1.2, 1.45, Z.z + 0.25 * Z.y) * 3.0;
 
-  // Shadows of the neutral gas, towards the main star.
-  // Ionising light dies within a thin skin of neutral gas, so the samples crowd near the point.
+  // Shadows of the neutral gas and the solids, towards the main star. Ionising light dies within a thin skin
+  // of neutral gas, so the samples crowd near the point.
   float sh = 0.0;
   for (int j = 0; j < 3; j++) {
-    float at = min(0.02 * float((j + 1) * (j + 1) * (j + 1)), r0 * 0.9);
-    vec3 qq = (p + radial * at) / uScale;
-    sh += neutralGas(qq, length(qq), 0.5) * (j == 0 ? 2.0 : 1.0);
+    float at = min(0.015 * float((j + 1) * (j + 1) * (j + 1)), r0 * 0.9);
+    sh += neutralGas(p + radial * at, true) * (j == 0 ? 2.0 : 1.0);
   }
   flux *= exp(-3.0 * sh);
 
-  // The diffuse gas is ionised where the starlight outweighs recombinations (flux against n^2); the neutral
-  // gas only on its skin, where the starlight reaches it: the bright rims of clouds and pillars.
+  // The gas is ionised where the starlight outweighs recombinations (flux against n^2); the neutral gas only
+  // on its skin, where the starlight reaches it: the bright rims of clouds.
   float lit = uP[1].w * flux;
-  float ion = smoothstep(0.03, 0.4, lit / (1.0 + 3.0 * n * n));
+  float x = lit / (1.0 + 3.0 * n * n);
+  float ion = smoothstep(0.03, 0.4, x);
   float front = neu * exp(-1.2 * neu) * smoothstep(0.2, 2.0, lit) * 2.2 * faceGlow;
-  float oiii = uP[1].y * smoothstep(0.6, 4.0, lit / (1.0 + 3.0 * n * n));
-  // H-alpha with more or less H-beta, by the reddening inside; [O III] near the hottest stars.
-  vec3 ha = mix(C_RED, C_HA, 0.35 + 0.65 * G.w);
-  e = (n * n * ion) * (ha * (1.0 - 0.6 * oiii) + C_OIII * oiii) + front * ha;
+  // Doubly ionised oxygen where the ionisation parameter is high: the hot cores glow teal-green.
+  float oiii = uP[1].y * x / (x + 4.0);
+  // H-alpha and [N II] (deep red) where the ionisation is low, with H-beta (pink) where it is higher.
+  vec3 ha = mix(C_RED, C_HA, smoothstep(0.1, 1.5, x) * (0.5 + 0.5 * G.w));
+  e = (n * n * ion) * (ha * (1.0 - 0.8 * oiii) + C_OIII * oiii * 1.4) + front * mix(C_RIM, C_OIII, 0.4 * oiii);
 
-  // Dust: in the neutral gas, a little in the ionised, and in the dark lanes in front.
-  float dust = neu + 0.06 * n;
-  // (Lanes lie across the nebula, not out in the open: they hide its light, not the sky's.)
-  float edge = smoothstep(0.0, 0.25, outer);
-  for (int j = 0; j < 2; j++) {
-    vec4 ln = uP[5 + j];
-    float s = uP[7][2 + j];
-    if (s <= 0.0) continue;
-    // A lane is a cloud, not a plane: its middle wanders and its thickness breaks up.
-    float dl = dot(qw, ln.xyz) - ln.w + 0.05 * Z.w;
-    dust += s * gauss(dl, uP[7][j] * (0.6 + 0.6 * G.y)) * edge * exp(0.9 * Z.z);
+  // Dust: in the neutral gas, a little in the ionised.
+  float dust = (neu + 0.05 * n) * uP[1].x;
+  // Lit dust: blue starlight near the stars, the nebula's own red light further out (brown).
+  float starShare = flux / (flux + 4.0);
+  e += dust * (uP[1].z * min(flux, 60.0) * 0.03 * starShare * C_SCAT + uP[5].w * 0.025 * env * C_BROWN);
+  e += refl * min(flux, 80.0) * 0.25 * C_SCAT;
+  k = (dust + refl * 0.3) * 6.0 * C_DUST * (1.0 - smoothstep(0.5, 1.0, r));
+}
+
+// Solids: pillars, trunks and globules, too sharp for the baked volume (and for the steps through it), drawn live.
+// Each is integrated on its own along the part of the ray near it, in fine steps, and composited into the march
+// where the ray passes it. They are opaque dust lit on the side that faces the main star, with a thin layer of
+// gas evaporating off that side, glowing: the bright rims and tips of the Pillars of Creation.
+vec3 gSolidL[6];
+vec3 gSolidT[6];
+float gSolidAt[6];
+int gSolidN;
+
+void solids(vec3 ro, vec3 rd, float pixel) {
+  gSolidN = 0;
+  for (int j = 0; j < 6; j++) {
+    if (j >= uLiveN) break;
+    vec4 A = uPr[j * 3], B = uPr[j * 3 + 1], C = uPr[j * 3 + 2];
+    float size = max(A.w, B.w);
+    float R = size * (1.5 + 1.5 * C.y);
+    // The part of the ray within R of the axis segment: a sphere around it, then a cylinder around its line.
+    vec3 ax = B.xyz - A.xyz;
+    float al = length(ax);
+    vec3 u = al > 1e-6 ? ax / al : vec3(0.0, 0.0, 1.0);
+    vec3 oc = ro - (A.xyz + B.xyz) * 0.5;
+    float bs = al * 0.5 + R;
+    float bb = dot(oc, rd), hh = bb * bb - dot(oc, oc) + bs * bs;
+    if (hh <= 0.0) continue;
+    hh = sqrt(hh);
+    float ta = max(-bb - hh, 0.0), tb = -bb + hh;
+    if (tb <= ta) continue;
+    vec3 w0 = ro - A.xyz;
+    vec3 rp = rd - u * dot(rd, u), wp = w0 - u * dot(w0, u);
+    float aa = dot(rp, rp), b2 = dot(wp, rp), h2 = b2 * b2 - aa * (dot(wp, wp) - R * R);
+    if (aa > 1e-8) {
+      if (h2 <= 0.0) continue;
+      h2 = sqrt(h2);
+      ta = max(ta, (-b2 - h2) / aa);
+      tb = min(tb, (-b2 + h2) / aa);
+      if (tb <= ta) continue;
+    }
+    vec3 L = vec3(0.0), T = vec3(1.0);
+    const int N = 16;
+    float dt = (tb - ta) / float(N);
+    float jit = fract(ign(gl_FragCoord.xy) + float(j) * 0.37);
+    vec3 toStar = normalize(uStar[0].xyz - (A.xyz + B.xyz) * 0.5);
+    for (int i = 0; i < N; i++) {
+      float t = ta + (float(i) + jit) * dt;
+      vec3 p = ro + rd * t;
+      float d = roundCone(p, A.xyz, B.xyz, A.w, B.w);
+      // Its surface, roughened at two scales.
+      d += C.y * size * 1.4 * ((n4(p / (size * 0.6) + float(j) * 7.3 + uSeed).x - 0.5) + 0.5 * (n4(p / (size * 0.2) + float(j) * 3.1).y - 0.5));
+      vec3 ap = p - A.xyz;
+      vec3 nrm = normalize(ap - u * clamp(dot(ap, u), 0.0, al));
+      float facing = smoothstep(-0.2, 0.8, dot(nrm, toStar));
+      float soft = max(size * 0.1, pixel * t * 1.5);
+      float dens = C.x * smoothstep(soft, -soft, d);
+      // The evaporating skin, just outside the surface on the lit side.
+      // (Brightest at the tip that faces the stars, where the light falls on it squarely.)
+      float skin = gauss(d - size * 0.12, size * 0.12 + soft * 0.5) * facing;
+      float tip = 1.0 + 1.5 * smoothstep(0.6, 1.0, clamp(dot(ap, u) / max(al, 1e-6), 0.0, 1.0)) * step(0.0, dot(u, toStar));
+      vec3 e = C.w * skin * tip * C_RIM * 7.0 + dens * 0.004 * C_BROWN;
+      vec3 kk = max(vec3(dens * 6.0 * uP[1].x) * C_DUST, vec3(1e-4));
+      vec3 tr = exp(-kk * dt);
+      L += T * e * (1.0 - tr) / kk;
+      T *= tr;
+    }
+    gSolidAt[gSolidN] = (ta + tb) * 0.5;
+    gSolidL[gSolidN] = L;
+    gSolidT[gSolidN] = T;
+    gSolidN++;
   }
-  dust *= uP[1].x;
-  e += uP[1].z * dust * min(flux, 60.0) * 0.03 * C_SCAT;
-  k = dust * 6.0 * C_DUST;
 }
 `;
 
@@ -467,6 +594,48 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
 `;
 
 const MAIN = /* glsl */ `
+// Small bright knots integrated exactly along the ray (an isotropic Gaussian has a closed form): the
+// Homunculus around Eta Carinae, the Hourglass, the brightest cores. (xyz, sigma), (rgb, amount).
+uniform vec4 uGlow[${MAX_GLOWS * 2}];
+uniform int uGlowN;
+float gGlowT[${MAX_GLOWS}];
+vec3 gGlowL[${MAX_GLOWS}];
+bool gGlowDone[${MAX_GLOWS}];
+
+void glows(vec3 ro, float t0, float t1) {
+  for (int i = 0; i < ${MAX_GLOWS}; i++) {
+    gGlowDone[i] = true;
+    if (i >= uGlowN) continue;
+    vec4 c = uGlow[i * 2];
+    float tc = dot(c.xyz - ro, gRd);
+    gGlowT[i] = tc;
+    vec3 off = ro + gRd * tc - c.xyz;
+    float d2 = dot(off, off) / (c.w * c.w);
+    if (d2 > 25.0 || tc < t0 - 3.0 * c.w || tc > t1 + 3.0 * c.w) continue;
+    gGlowDone[i] = false;
+    gGlowL[i] = uGlow[i * 2 + 1].rgb * uGlow[i * 2 + 1].a * c.w * 1.7725 * exp(-d2);
+  }
+}
+
+// Lay what lies before distance t along the ray (glows, solids) over what has been gathered so far.
+void passTo(float t) {
+  for (int i = 0; i < ${MAX_GLOWS}; i++) {
+    if (gGlowDone[i] || gGlowT[i] > t) continue;
+    gL += gT * gGlowL[i];
+    gGlowDone[i] = true;
+  }
+#ifdef SOLIDS
+  for (int j = 0; j < 6; j++) {
+    if (j >= gSolidN) break;
+    if (gSolidAt[j] > t) continue;
+    gL += gT * gSolidL[j];
+    gT *= gSolidT[j];
+    gSolidAt[j] = 1e30;
+    gSolidL[j] = vec3(0.0);
+    gSolidT[j] = vec3(1.0);
+  }
+#endif
+}
 
 void marchSpan(vec3 ro, float ta, float tb, int steps, float jit) {
   if (tb <= ta) return;
@@ -487,6 +656,7 @@ void marchSpan(vec3 ro, float ta, float tb, int steps, float jit) {
     float t = tc + D * tan(th);
     float dt = D * da / (c * c);
     vec3 e, k;
+    passTo(t);
     SAMPLE(ro + gRd * t, t * uPixel, dt, e, k);
     // Light emitted along the step, dimmed by the dust of the step itself.
     vec3 kk = max(k, vec3(1e-4));
@@ -508,6 +678,10 @@ void main() {
   if (t1 <= 0.0) discard;
   gL = vec3(0.0);
   gT = vec3(1.0);
+  glows(ro, t0, t1);
+#ifdef SOLIDS
+  solids(ro, gRd, uPixel);
+#endif
   float jit = ign(gl_FragCoord.xy);
   int steps = int(uSteps);
 #ifdef SHELL
@@ -531,6 +705,7 @@ void main() {
 #else
   marchSpan(ro, t0, t1, steps, jit);
 #endif
+  passTo(1e29);
   float a = (1.0 - (gT.r + gT.g + gT.b) / 3.0) * uDust;
   // (Into half floats: a single overflowing pixel would be spread over the whole frame by the bloom.)
   gl_FragColor = vec4(min(gL * uGain, vec3(6e4)), a) * uWeight;
@@ -552,7 +727,7 @@ void baked(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   if (more > 0.0 && v.a + v.r > 1e-5) {
     vec3 dq = p * (1.5 / uVoxel) + uSeed;
     float z = (n4(dq).x - 0.5) + 0.5 * clamp(more - 1.0, 0.0, 1.0) * (n4(ROT * dq * 2.1).y - 0.5);
-    m = exp((1.4 * z - 0.05) * min(more, 1.0));
+    m = exp((0.9 * z - 0.02) * min(more, 1.0));
   }
   e = v.rgb * m * m;
   k = v.a * m * C_DUST;
@@ -584,7 +759,7 @@ export type Mode = 'march' | 'baked' | 'bake';
 
 export function nebulaFragment(family: Family, mode: Mode = 'march'): string {
   const body = family === 'hii' ? HII : family === 'pn' ? PN : family === 'snr' ? SNR : REFL;
-  const shell = family === 'snr' ? '#define SHELL\n' : '';
+  const shell = (family === 'snr' ? '#define SHELL\n' : '') + (family === 'hii' ? '#define SOLIDS\n' : '');
   if (mode === 'bake') return `${COMMON}${body}${BAKE_MAIN}`;
   if (mode === 'baked') return `${shell}#define SAMPLE baked\n#define BAKED_VOLUME\n${COMMON}${body}${BAKED}${MAIN}`;
   return `${shell}#define SAMPLE medium\n${COMMON}${body}${MAIN}`;
