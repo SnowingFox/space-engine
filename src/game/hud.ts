@@ -45,6 +45,8 @@ export interface HudFrame {
   speedSetting: number;
   /** The proximity safety limit is holding the speed down. */
   limited: boolean;
+  /** The fastest the proximity limit allows here, km/s. */
+  cap: number;
   /** Nearest body or region, and where we are relative to it. */
   place: string;
   placeDetail: string;
@@ -256,18 +258,22 @@ export class Hud {
     setText(this.modeEl, f.mode);
     this.modeEl.classList.toggle('auto', f.auto);
     setText(this.velEl, formatSpeed(f.speed));
-    setText(this.setEl, formatSpeed(f.speedSetting));
+    // Near a body the setting is capped: show what thrust will actually do here, and the setting on hover.
+    const capped = f.cap < f.speedSetting;
+    const effective = formatSpeed(capped ? f.cap : f.speedSetting);
+    setText(this.setEl, effective);
+    this.setEl.title = capped ? `Setting ${formatSpeed(f.speedSetting)}, limited near bodies` : '';
     // A change of the speed setting shows top-centre for a moment, then fades.
     if (f.speedSetting !== this.lastSetting) {
       if (this.lastSetting > 0) {
-        this.speedNoteEl.textContent = formatSpeed(f.speedSetting);
+        this.speedNoteEl.textContent = capped ? `${effective}  (setting ${formatSpeed(f.speedSetting)}, limited here)` : effective;
         this.speedNoteEl.classList.add('show');
         clearTimeout(this.speedNoteTimer);
         this.speedNoteTimer = window.setTimeout(() => this.speedNoteEl.classList.remove('show'), 1400);
       }
       this.lastSetting = f.speedSetting;
     }
-    this.limitEl.classList.toggle('show', f.limited);
+    this.limitEl.classList.toggle('show', f.limited || f.cap < f.speedSetting);
     setText(this.placeEl, f.place);
     setText(this.placeDetailEl, f.placeDetail);
 

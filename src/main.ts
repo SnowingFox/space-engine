@@ -555,6 +555,7 @@ function frame(now: number): void {
     speed: player.speed,
     speedSetting: player.speedSetting,
     limited: player.limited,
+    cap: player.cap,
     place,
     placeDetail,
     timeRate,

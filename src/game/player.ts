@@ -64,6 +64,8 @@ export class Player {
   speedSetting = 3000;
   /** True while the proximity safety limit is holding the speed below the setting. */
   limited = false;
+  /** The fastest the proximity limit allows here, km/s (Infinity far from everything). */
+  cap = Infinity;
   /** C / T: turn the camera towards a target; with 'hold' keep it centred. */
   aim: { target: Target; hold: boolean } | null = null;
   /** Called when the autopilot reaches its destination. */
@@ -133,6 +135,7 @@ export class Player {
     if (thrust.lengthSq() > 0) this.autopilot = null;
 
     this.limited = false;
+    this.cap = this.speedLimit(obstacles);
     if (this.autopilot) {
       this.flyAutopilot(dt, simTime, obstacles);
     } else {
@@ -141,7 +144,7 @@ export class Player {
       // Released keys mean a clean stop, not an endless exponential tail.
       if (thrust.lengthSq() === 0 && this.velocity.length() < this.speedSetting * 0.01) this.velocity.set(0, 0, 0);
       // Slow down near surfaces so a planet can be approached at any speed setting.
-      const limit = this.speedLimit(obstacles);
+      const limit = this.cap;
       if (this.velocity.length() > limit) {
         this.velocity.setLength(limit);
         this.limited = true;
@@ -265,7 +268,10 @@ export class Player {
     this.autopilot = null;
     this.velocity.set(0, 0, 0);
     this.collide(obstacles);
-    this.setSpeedFor(Number.isFinite(this.altitude) ? this.altitude : parkingDistance(ap.target));
+    // A galaxy is approached at a speed that takes a good while to cross it, so the first press of W
+    // does not shoot straight past it.
+    if (ap.target.kind === 'galaxy') this.speedSetting = THREE.MathUtils.clamp(parkingDistance(ap.target) / 30, MIN_SPEED, MAX_SPEED);
+    else this.setSpeedFor(Number.isFinite(this.altitude) ? this.altitude : parkingDistance(ap.target));
     this.onArrive(ap.target, ap.land);
   }
 

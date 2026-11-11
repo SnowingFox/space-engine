@@ -44,8 +44,9 @@ void main() {
   intensity *= smoothstep(8.8, 6.0, mag);
   // Scintillation: turbulence in the air focuses and spreads each star's light, many times a second.
   float ph = fract(aId * 0.6180339) * 6.2831853;
-  float flicker = sin(uTime * (9.0 + 7.0 * fract(aId * 0.31)) + ph) * sin(uTime * (3.1 + 2.0 * fract(aId * 0.77)) + 2.0 * ph);
-  intensity *= 1.0 + uTwinkle * 0.6 * flicker;
+  float flicker = sin(uTime * (17.0 + 9.0 * fract(aId * 0.31)) + ph) * sin(uTime * (6.1 + 3.0 * fract(aId * 0.77)) + 2.0 * ph);
+  // (A few tenths of a magnitude at most for the eye at a good site, and faster than it can follow.)
+  intensity *= 1.0 + uTwinkle * 0.18 * flicker;
   // Moving fast, a star's light is spread along its streak (drawn by the lines below): the point keeps only its share.
   float px = size * uPixelRatio;
   intensity *= px / max(px, streakPx(position));
