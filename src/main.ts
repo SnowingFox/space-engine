@@ -9,7 +9,6 @@ import { SCENIC_SPOTS, type BodyPose, type ScenicPose } from './game/scenic';
 import { aimPose, galacticToLocal, resolveBodyPose, spaceQuat } from './game/scenicPose';
 import { galaxyTarget, parkingDistance, sameTarget, targetName, targetPosition, targetRadius, type Target } from './game/target';
 import { GALAXIES, NAMED_GALAXIES, nearestGalaxy, type GalaxyData } from './universe/universe';
-import { makeDeepField } from './render/deepField';
 import { GalaxyCloud } from './render/galaxyCloud';
 import { Nebulae } from './render/nebulae';
 import { Pipeline } from './render/pipeline';
@@ -40,7 +39,8 @@ const input = new Input(canvas);
 const starfield = new Starfield(pipeline.pixelRatio);
 const cloud = new GalaxyCloud();
 const nebulae = new Nebulae();
-pipeline.bgScene.add(makeDeepField(pipeline.pixelRatio), cloud.group, nebulae.group, starfield.group);
+// (Every point of light drawn is a real, selectable star or galaxy: no decorative star field.)
+pipeline.bgScene.add(cloud.group, nebulae.group, starfield.group);
 /** Where the camera was last frame (galactic, ly), for motion blur. */
 const lastGal = new THREE.Vector3(NaN, 0, 0);
 const travel = new THREE.Vector3();
@@ -574,7 +574,8 @@ function frame(now: number): void {
   }
   const air = low?.body.atmosphere;
   const depth = air ? 1 - THREE.MathUtils.smoothstep(player.altitude / low!.body.radius, 0, low!.view.atmoTop - 1) : 0;
-  starfield.setTwinkle(air ? Math.min(air.density, 1.5) * depth * depth : 0, now / 1000);
+  starfield.setTwinkle(air ? Math.min(air.density, 1.5) * depth * depth : 0, now / 1000,
+    air ? Math.min(air.density, 1.5) * depth : 0, air ? pipeline.daylight * depth : 0);
   // So they do next to a world in full daylight.
   dazzle = Math.max(dazzle, 0.8 * pipeline.daylight);
   pipeline.skyDim += (dazzle - pipeline.skyDim) * (1 - Math.exp(-dt / 0.4));

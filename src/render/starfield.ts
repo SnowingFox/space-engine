@@ -3,6 +3,8 @@ import { SECTOR_LEVELS, generateSector, sectorOfPosition, sectorSize } from '../
 import { temperatureToRgb, type StarData } from '../universe/stars';
 
 const RADIUS = 3; // sectors loaded around the camera in each direction, per level
+/** Faintest magnitude shown in open space (where the fade to nothing ends). */
+const SPACE_LIMIT = 8.8;
 /** Time per frame spent generating star sectors while flying, ms. */
 const SECTOR_BUDGET_MS = 2.5;
 
@@ -14,6 +16,7 @@ attribute float aId;
 uniform float uHideId;
 uniform float uPixelRatio;
 uniform float uTwinkle;  // seen through air, starlight flickers
+uniform float uLimit;    // faintest magnitude that shows: fainter under a bright sky or through air
 uniform float uTime;
 uniform vec3 uTrail;     // how far the camera moved during one exposure, ly (universe axes)
 uniform float uPpr;      // device pixels per radian
@@ -37,11 +40,11 @@ void main() {
   float mag = -2.5 * log(flux) / 2.302585 - 2.74;    // apparent magnitude
   // Brightness compressed less than before: a handful of bright stars, the rest faint pinpoints,
   // as in long-exposure photographs (and Space Engine) rather than a field of equal sparks.
-  float intensity = clamp(pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0);
-  // Pinpoints: only the few brightest stars grow beyond a couple of pixels.
-  float size = clamp(2.7 - mag * 0.32, 1.0, 3.8);
+  float intensity = clamp(1.25 * pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0);
+  // Pinpoints: most stars are a pixel or two; only the brightest grow, and their glow comes from the bloom.
+  float size = clamp(2.1 - mag * 0.26, 1.0, 3.0);
   // About what the eye sees on a dark night; fainter stars fade out instead of flickering.
-  intensity *= smoothstep(8.8, 6.0, mag);
+  intensity *= smoothstep(uLimit, uLimit - 2.8, mag);
   // Scintillation: turbulence in the air focuses and spreads each star's light, many times a second.
   float ph = fract(aId * 0.6180339) * 6.2831853;
   float flicker = sin(uTime * (17.0 + 9.0 * fract(aId * 0.31)) + ph) * sin(uTime * (6.1 + 3.0 * fract(aId * 0.77)) + 2.0 * ph);
@@ -67,8 +70,8 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   float d = max(length(mv.xyz), 1e-4);
   float mag = -2.5 * log(aLum / (d * d)) / 2.302585 - 2.74;
-  float intensity = clamp(pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0) * smoothstep(8.8, 6.0, mag);
-  float size = clamp(2.7 - mag * 0.45, 1.0, 3.8) * uPixelRatio;
+  float intensity = clamp(1.25 * pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0) * smoothstep(uLimit, uLimit - 2.8, mag);
+  float size = clamp(2.1 - mag * 0.26, 1.0, 3.0) * uPixelRatio;
   float len = streakPx(position);
   // The same light as the point would carry, spread over the streak's length (a line is a pixel wide).
   float spread = size * size / max(len, 1.0);
@@ -117,7 +120,7 @@ export class Starfield {
       fragmentShader: FRAG,
       uniforms: {
         uHideId: { value: -1 }, uPixelRatio: { value: pixelRatio }, uTwinkle: { value: 0 }, uTime: { value: 0 },
-        uTrail: { value: new THREE.Vector3() }, uPpr: { value: 1000 },
+        uTrail: { value: new THREE.Vector3() }, uPpr: { value: 1000 }, uLimit: { value: SPACE_LIMIT },
       },
       blending: THREE.AdditiveBlending,
       depthTest: false,
@@ -158,10 +161,16 @@ export class Starfield {
     for (const lv of this.levels) lv.streaks.visible = moving && lv.stars.length > 0;
   }
 
-  /** twinkle: 0 in space, 1 at the bottom of an Earth-like atmosphere. */
-  setTwinkle(twinkle: number, time: number): void {
-    this.material.uniforms.uTwinkle.value = twinkle;
-    this.material.uniforms.uTime.value = time;
+  /**
+   * twinkle: 0 in space, 1 at the bottom of an Earth-like atmosphere. air: how much air is overhead,
+   * 0..1; skyGlow: the sky's own brightness behind the stars, 0..1. From the ground at night the eye
+   * reaches about magnitude 6.5 (2 less than in space); airglow, twilight and moonlight take more.
+   */
+  setTwinkle(twinkle: number, time: number, air = 0, skyGlow = 0): void {
+    const u = this.material.uniforms;
+    u.uTwinkle.value = twinkle;
+    u.uTime.value = time;
+    u.uLimit.value = SPACE_LIMIT - 2.3 * air - 4.5 * Math.min(Math.max(skyGlow, 0), 1);
   }
 
   /** The star whose point sprite is suppressed because it is drawn as a real sphere. */
