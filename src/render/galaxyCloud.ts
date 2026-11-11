@@ -1,0 +1,340 @@
+import * as THREE from 'three';
+import { Rng } from '../core/rng';
+import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
+import { GALAXY_GLSL, galaxyNoise } from './galaxyShader';
+import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
+import { HomeSky, PLANE_FADE } from './homeSky';
+import { SOFT_LAYER, softLayer } from './pipeline';
+
+// A galaxy is marched where it is drawn, every frame, whenever the camera is outside its disc.
+// Inside a disc the view is the surveyed sky (HomeSky); where that does not apply, in the core,
+// the galaxy is marched into a sky map instead, a few strips per frame.
+const NEAR_START = 6, NEAR_END = 8;
+// A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
+// resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
+const BIG_PX = [450, 700];
+const INSIDE_GAIN = 0.5, OUTSIDE_GAIN = 1.3;
+/** Brightness of the surveyed sky inside a disc. */
+const HOME_GAIN = 1.1;
+
+const FIELD_VERT = /* glsl */ `
+attribute vec3 iPos;
+attribute vec3 iX;
+attribute vec3 iY;
+attribute vec3 iZ;
+attribute vec4 iA;
+attribute vec4 iB;
+attribute vec4 iC;
+attribute vec4 iD;
+attribute vec4 iGlow;   // rgb: light of the whole galaxy as one soft spot; a: its id
+uniform vec3 uCam;
+uniform float uPixelsPerRadian;
+uniform float uFullPpr;   // pixels per radian of the full-resolution view, whichever pass this is
+uniform vec2 uBig;
+uniform float uBrightness;
+uniform vec2 uNearId;
+uniform vec2 uNearWeight;
+uniform float uHideClouds;
+varying vec3 vEye;
+varying vec3 vRay;
+varying vec4 vA;
+varying vec4 vB;
+varying vec4 vC;
+varying vec4 vD;
+varying vec4 vSpot;   // rgb: colour, a: falloff across the quad
+varying vec3 vMode;   // weight, 0 marched .. 1 spot, march steps
+varying vec2 vQuad;
+void main() {
+  vec3 c = iPos - uCam;
+  float d = length(c);
+  float bound = iA.x * 1.2;
+  float px = iA.x / d * uPixelsPerRadian;
+  float weight = smoothstep(1.2, 1.8, d / bound);
+  if (iGlow.a == uNearId.x) weight = uNearWeight.x;
+  if (iGlow.a == uNearId.y) weight = uNearWeight.y;
+  float big = smoothstep(uBig.x, uBig.y, iA.x / d * uFullPpr);
+#ifdef SOFT_PASS
+  weight *= big;
+#else
+  weight *= 1.0 - big;
+#endif
+  // The surveyed sky has the Magellanic Clouds in it already.
+  if (iGlow.a == 1.0 || iGlow.a == 2.0) weight *= 1.0 - uHideClouds;
+  // Too small to show any structure: a soft spot carrying the same light, never smaller than a pixel.
+  float spot = smoothstep(12.0, 5.0, px);
+  float sigma = max(0.3 * px, 1.1);
+  float cover = bound * 1.02 * d / sqrt(max(d * d - bound * bound, 0.05 * d * d));
+  float halfPx = max(cover / d * uPixelsPerRadian, 3.2 * sigma * spot);
+  float size = halfPx * d / uPixelsPerRadian;
+  vec3 f = c / d;
+  vec3 right = normalize(cross(f, abs(f.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+  vec3 up = cross(right, f);
+  vec3 world = c + (right * position.x + up * position.y) * size;
+  mat3 frame = transpose(mat3(iX, iY, iZ));
+  vEye = frame * -c;
+  vA = iA; vB = iB; vC = iC;
+  vD = vec4(iD.xy, iD.z * uBrightness, iD.w);
+  float dim = 0.3 * px / sigma;
+  vSpot = vec4(iGlow.rgb * (uBrightness * dim * dim), halfPx * halfPx / (2.0 * sigma * sigma));
+  vec4 clip = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
+  // With the camera inside the bounding sphere, or close to it, a billboard cannot cover the galaxy: the whole view does.
+  if (d < bound * 1.3) {
+    clip = vec4(position.xy, 0.0, 1.0);
+    vec4 v = inverse(projectionMatrix) * clip;
+    world = transpose(mat3(modelViewMatrix)) * (v.xyz / v.w);
+  }
+  vRay = frame * world;
+  vMode = vec3(weight, spot, clamp(iA.x / d * uFullPpr * 0.1, 8.0, 24.0));
+  vQuad = position.xy;
+  gl_Position = weight > 0.0 ? clip : vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+
+const FIELD_FRAG = /* glsl */ `
+${GALAXY_GLSL}
+uniform float uPixelsPerRadian;
+varying vec3 vEye;
+varying vec3 vRay;
+varying vec4 vA;
+varying vec4 vB;
+varying vec4 vC;
+varying vec4 vD;
+varying vec4 vSpot;
+varying vec3 vMode;
+varying vec2 vQuad;
+void main() {
+  vec4 col = vec4(0.0);
+  if (vMode.y < 1.0) {
+    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
+  }
+  if (vMode.y > 0.0) col.rgb += vSpot.rgb * (exp(-dot(vQuad, vQuad) * vSpot.a) * vMode.y);
+  gl_FragColor = col * vMode.x;
+}
+`;
+
+const SPARKLE_VERT = /* glsl */ `
+attribute vec3 aColor;
+attribute float aSize;
+uniform float uPixelsPerRadian;
+uniform float uGain;
+varying vec3 vColor;
+void main() {
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = aSize * uPixelsPerRadian / 900.0;
+  vColor = aColor * uGain;
+}
+`;
+
+const SPARKLE_FRAG = /* glsl */ `
+varying vec3 vColor;
+void main() {
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float a = exp(-dot(p, p) * 3.5) - 0.03;
+  if (a <= 0.0) discard;
+  gl_FragColor = vec4(vColor * a, 1.0);
+}
+`;
+
+const NO_GALAXIES: NearGalaxy[] = [];
+
+/** The light of a whole galaxy gathered into one spot of 0.3 radii: what it looks like from too far to resolve. */
+function glowOf(g: GalaxyData): number[] {
+  const area = 0.09 * g.radius * g.radius;
+  // The same weighting of disc and bulge light as the march.
+  const disc = (2.4 * g.discLum * 2 * g.height * 0.6 * g.discScale * g.discScale) / area;
+  const bulge = (0.6 * g.bulgeLum * 4 * g.bulgeScale ** 3) / (g.bulgeFlat * area);
+  const young = 0.5 * g.blue;
+  return [
+    disc * (1 - 0.4 * young) + bulge,
+    disc * (0.84 - 0.09 * young) + bulge * 0.82,
+    disc * (0.66 + 0.34 * young) + bulge * 0.58,
+  ];
+}
+
+function gamma(rng: Rng, k: number, scale: number): number {
+  let s = 0;
+  for (let i = 0; i < k; i++) s -= Math.log(Math.max(rng.next(), 1e-9));
+  return s * scale;
+}
+
+/** Every galaxy of the universe: a marched sky for the ones around the camera, billboards for the rest. */
+export class GalaxyCloud {
+  readonly group = new THREE.Group();
+  private readonly volume = new GalaxyVolume();
+  private readonly home = new HomeSky();
+  /** Around the Sun, show the Milky Way as surveyed from Earth instead of the model. */
+  survey = true;
+  private readonly field: THREE.ShaderMaterial;
+  private readonly fieldSoft: THREE.ShaderMaterial;
+  private readonly sparkle: THREE.ShaderMaterial;
+  private sparklePoints: THREE.Points | null = null;
+  private sparkleOf = -1;
+  private readonly near: NearGalaxy[] = [];
+  private readonly eyes = GALAXIES.map(() => ({ x: 0, y: 0, z: 0 }));
+
+  constructor() {
+    const n = GALAXIES.length;
+    const quad = new THREE.PlaneGeometry(2, 2);
+    const geometry = new THREE.InstancedBufferGeometry();
+    geometry.setAttribute('position', quad.getAttribute('position'));
+    geometry.setIndex(quad.getIndex());
+    geometry.instanceCount = n;
+    const attribute = (name: string, width: number, of: (g: GalaxyData) => number[]): void => {
+      const data = new Float32Array(n * width);
+      GALAXIES.forEach((g, i) => data.set(of(g), i * width));
+      geometry.setAttribute(name, new THREE.InstancedBufferAttribute(data, width));
+    };
+    attribute('iPos', 3, (g) => [g.x, g.y, g.z]);
+    attribute('iX', 3, (g) => g.axes.slice(0, 3));
+    attribute('iY', 3, (g) => g.axes.slice(3, 6));
+    attribute('iZ', 3, (g) => g.axes.slice(6, 9));
+    ['iA', 'iB', 'iC', 'iD'].forEach((name, k) => attribute(name, 4, (g) => galaxyParams(g, 1)[k]));
+    attribute('iGlow', 4, (g) => [...glowOf(g), g.id]);
+
+    const make = (uniforms: Record<string, THREE.IUniform>, defines: Record<string, number>): THREE.ShaderMaterial => new THREE.ShaderMaterial({
+      vertexShader: FIELD_VERT, fragmentShader: FIELD_FRAG, uniforms, defines,
+      transparent: true, premultipliedAlpha: true, depthTest: false, depthWrite: false,
+    });
+    this.field = make({
+      uCam: { value: new THREE.Vector3() }, uPixelsPerRadian: { value: 1000 }, uFullPpr: { value: 1000 }, uBig: { value: new THREE.Vector2(...BIG_PX) },
+      uBrightness: { value: 1 }, uNearId: { value: new THREE.Vector2(-1, -1) }, uNearWeight: { value: new THREE.Vector2() },
+      uHideClouds: { value: 0 }, uNoise: { value: galaxyNoise },
+    }, {});
+    // The same galaxies on the soft layer; only the resolution differs.
+    this.fieldSoft = make({ ...this.field.uniforms, uPixelsPerRadian: { value: 1000 } }, { SOFT_PASS: 1 });
+    const billboards = new THREE.Mesh(geometry, this.field);
+    billboards.frustumCulled = false;
+    billboards.renderOrder = -4;
+    const large = new THREE.Mesh(geometry, this.fieldSoft);
+    large.frustumCulled = false;
+    large.layers.set(SOFT_LAYER);
+    this.group.add(large);
+    this.volume.mesh.renderOrder = -3;
+    this.home.mesh.renderOrder = -3;
+    this.group.add(billboards, this.volume.mesh, this.home.mesh);
+
+    this.sparkle = new THREE.ShaderMaterial({
+      vertexShader: SPARKLE_VERT,
+      fragmentShader: SPARKLE_FRAG,
+      uniforms: { uPixelsPerRadian: { value: 1000 }, uGain: { value: 0 } },
+      blending: THREE.AdditiveBlending, transparent: true, depthTest: false, depthWrite: false,
+    });
+  }
+
+  /** The brightest stars and clusters of a disc, which stay sharp when the galaxy fills the view from outside. */
+  private makeSparkle(g: GalaxyData): THREE.Points {
+    const rng = new Rng(7001 + g.id);
+    const count = Math.round(26000 * Math.min(1, g.radius / 40000));
+    const pos = new Float32Array(count * 3);
+    const col = new Float32Array(count * 3);
+    const size = new Float32Array(count);
+    const tints = [[0.7, 0.8, 1.0], [0.7, 0.8, 1.0], [1.0, 1.0, 1.0], [1.0, 0.72, 0.42]];
+    for (let i = 0; i < count; i++) {
+      let rad = 0, th = 0;
+      for (let tries = 0; tries < 14; tries++) {
+        rad = Math.min(gamma(rng, 2, g.discScale), g.radius * rng.range(0.9, 1.05));
+        th = rng.range(0, Math.PI * 2);
+        // The same wobble the march gives the arms.
+        const warped = th + 0.2 * Math.sin(rad / (g.radius * 0.1) + g.seed) + 0.08 * Math.sin(3 * th + rad / (g.radius * 0.048));
+        const arm = armStrengthOf(g, rad * Math.cos(warped), rad * Math.sin(warped));
+        if (rng.next() < 0.05 + 0.95 * arm) break;
+      }
+      const blur = g.radius * 0.01;
+      pos.set([rad * Math.cos(th) + rng.gauss() * blur, rng.gauss() * g.height * 0.3, rad * Math.sin(th) + rng.gauss() * blur], i * 3);
+      // Few are bright, most barely show.
+      const gain = Math.min(0.13 * Math.pow(Math.max(rng.next(), 1e-4), -0.5), 1.8);
+      col.set(rng.pick(tints).map((c) => c * gain), i * 3);
+      size[i] = rng.range(0.8, 1.3) + 0.5 * Math.min(gain, 1.2);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geometry.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geometry.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    const points = new THREE.Points(geometry, this.sparkle);
+    points.frustumCulled = false;
+    points.renderOrder = -2;
+    points.matrixAutoUpdate = false;
+    return points;
+  }
+
+  /** cam: position in the universe (ly); gain: brightness of all galaxy light, 1 = as calibrated. */
+  update(cam: { x: number; y: number; z: number }, pixelsPerRadian: number, gain: number): void {
+    // The galaxies near enough for the sky map, nearest (in their own radii) first.
+    const near = this.near;
+    near.length = 0;
+    for (const g of GALAXIES) {
+      const d = Math.hypot(g.x - cam.x, g.y - cam.y, g.z - cam.z) / g.radius;
+      if (d >= NEAR_END) continue;
+      const eye = this.eyes[g.id];
+      toGalaxy(g, cam.x, cam.y, cam.z, eye);
+      near.push({ galaxy: g, eye, weight: 1 - THREE.MathUtils.smoothstep(d, NEAR_START, NEAR_END) });
+    }
+    const span = (n: NearGalaxy): number => Math.hypot(n.eye.x, n.eye.y, n.eye.z) / n.galaxy.radius;
+    near.sort((a, b) => span(a) - span(b));
+    near.length = Math.min(near.length, NEAR_GALAXIES);
+    // The eye adapts: inside a disc its light is all around and reads dimmer than the same galaxy seen whole from outside.
+    const host = near[0];
+    let out = 1;
+    if (host) {
+      const g = host.galaxy;
+      out = THREE.MathUtils.smoothstep(Math.max(Math.abs(host.eye.y) - g.height, Math.hypot(host.eye.x, host.eye.z) - g.radius), 0, g.radius * 0.35);
+    }
+    gain *= THREE.MathUtils.lerp(INSIDE_GAIN, OUTSIDE_GAIN, out);
+    const surveyed = this.home.update(host, pixelsPerRadian, this.survey ? HOME_GAIN : 0);
+    // Out of the disc the host is marched directly; what neither that nor the survey shows is left to the sky map.
+    let direct = 0;
+    if (host) {
+      const g = host.galaxy;
+      const r = Math.hypot(host.eye.x, host.eye.z);
+      direct = g.discLum > 0
+        ? Math.max(THREE.MathUtils.smoothstep(Math.abs(host.eye.y), PLANE_FADE[0] * g.height, PLANE_FADE[1] * g.height), THREE.MathUtils.smoothstep(r, 0.85 * g.radius, 1.05 * g.radius))
+        : 1;
+    }
+    const mapped = Math.max(0, 1 - direct - (this.survey ? HomeSky.cover(host) : 0));
+    this.volume.update(mapped > 0.002 ? near : NO_GALAXIES, gain * mapped);
+
+    const f = this.field.uniforms;
+    f.uCam.value.set(cam.x, cam.y, cam.z);
+    f.uPixelsPerRadian.value = pixelsPerRadian;
+    f.uFullPpr.value = pixelsPerRadian;
+    this.fieldSoft.uniforms.uPixelsPerRadian.value = pixelsPerRadian * softLayer.scale;
+    f.uBrightness.value = gain;
+    for (let i = 0; i < NEAR_GALAXIES; i++) {
+      f.uNearId.value.setComponent(i, near[i] ? near[i].galaxy.id : -1);
+      f.uNearWeight.value.setComponent(i, near[i] ? 1 - near[i].weight * (i === 0 ? 1 - direct : mapped) : 0);
+    }
+    f.uHideClouds.value = host?.galaxy.id === 0 ? surveyed : 0;
+
+    // Sparkle belongs to the nearest disc galaxy and shows once the camera is out of its disc.
+    let show = 0;
+    if (host && host.galaxy.discLum > 0) {
+      const g = host.galaxy;
+      const outside = Math.max(Math.abs(host.eye.y), Math.hypot(host.eye.x, host.eye.z) - g.radius);
+      // (Seen edge-on they would pile up into sand along the far side of the disc.)
+      const steep = Math.abs(host.eye.y) / Math.max(Math.hypot(host.eye.x, host.eye.z), g.radius * 0.3);
+      show = THREE.MathUtils.smoothstep(outside, g.radius * 0.03, g.radius * 0.4) * (1 - THREE.MathUtils.smoothstep(span(host), 1.2, 3.2)) * THREE.MathUtils.smoothstep(steep, 0.12, 0.4);
+      if (show > 0.01 && this.sparkleOf !== g.id) {
+        if (this.sparklePoints) {
+          this.group.remove(this.sparklePoints);
+          this.sparklePoints.geometry.dispose();
+        }
+        this.sparklePoints = this.makeSparkle(g);
+        this.sparkleOf = g.id;
+        this.group.add(this.sparklePoints);
+      }
+      if (this.sparklePoints && this.sparkleOf === g.id) {
+        const a = g.axes;
+        this.sparklePoints.matrix.set(
+          a[0], a[3], a[6], g.x - cam.x,
+          a[1], a[4], a[7], g.y - cam.y,
+          a[2], a[5], a[8], g.z - cam.z,
+          0, 0, 0, 1,
+        );
+        this.sparklePoints.matrixWorldNeedsUpdate = true;
+      }
+    }
+    if (this.sparklePoints) this.sparklePoints.visible = show > 0.01 && this.sparkleOf === host?.galaxy.id;
+    this.sparkle.uniforms.uPixelsPerRadian.value = pixelsPerRadian;
+    this.sparkle.uniforms.uGain.value = show * 0.6 * gain;
+  }
+}

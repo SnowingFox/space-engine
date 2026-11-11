@@ -1,0 +1,9 @@
+node_modules
+dist
+.DS_Store
+# Local only: raw source downloads (2.8 GB), the Python venv for the texture scripts, screenshots
+.texvenv
+assets-src
+shots
+# Scratch debugging scripts
+scripts/_*.mjs

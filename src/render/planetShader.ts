@@ -1,0 +1,374 @@
+import { atmoCommon } from './atmosphereScatter';
+import { LOGDEPTH_FRAG_PARS, LOGDEPTH_VERT, LOGDEPTH_VERT_PARS, NOISE } from './glsl';
+import { SHADOW_LOOKUP, SHADOW_PROJECT } from './terrainShadow';
+
+export const RING_DENSITY = /* glsl */ `
+float ringNoise(float x) {
+  float i = floor(x);
+  float f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(fract(sin(i * 127.1) * 43758.5453), fract(sin((i + 1.0) * 127.1) * 43758.5453), f);
+}
+
+// Radial ring structure; t is 0 at the inner edge and 1 at the outer edge.
+float ringDensity(float t, float seed) {
+  if (t < 0.0 || t > 1.0) return 0.0;
+  float x = t + seed;
+  float d = 0.5 * ringNoise(x * 9.0) + 0.3 * ringNoise(x * 37.0) + 0.2 * ringNoise(x * 151.0);
+  d = smoothstep(0.2, 0.7, d);
+  float fine = 0.85 + 0.15 * ringNoise(x * 900.0);
+  float gap = smoothstep(0.0, 0.018, abs(t - 0.62 - 0.1 * sin(seed)));  // one wide division
+  float edges = smoothstep(0.0, 0.03, t) * smoothstep(1.0, 0.96, t);
+  float profile = mix(0.3, 1.0, smoothstep(0.05, 0.35, t));              // faint inner ring
+  return clamp((0.3 + 0.7 * d) * fine * gap * edges * profile, 0.0, 1.0);
+}
+`;
+
+export const PLANET_VERT = /* glsl */ `
+${LOGDEPTH_VERT_PARS}
+uniform vec3 uCamObj;
+varying vec3 vObj;
+varying vec3 vView;
+varying vec3 vFine;
+varying float vSkirt;
+void main() {
+  vObj = position;
+  vView = position - uCamObj;
+  vFine = vec3(0.0);
+  vSkirt = 0.0;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  ${LOGDEPTH_VERT}
+}
+`;
+
+// Uniforms and height functions shared by the terrain vertex shader, the surface
+// fragment shader, the cloud shell and the ground probe, so they all agree.
+// Planet types: 0 terran/ocean, 1 desert, 2 barren, 3 ice, 4 lava, 5 gas, 6 ice giant.
+export const PLANET_COMMON = /* glsl */ `
+${NOISE}
+uniform int uType;
+uniform vec3 uPal[4];
+uniform float uSeed;
+uniform float uSea;
+uniform float uClouds;
+uniform float uTime;
+uniform float uPolar;       // 0..1 polar cap extent
+uniform vec3 uSunDir;       // object space, towards the star
+uniform vec3 uSunColor;
+uniform vec3 uCamObj;       // camera position in object space (planet radii)
+uniform vec3 uAtmoColor;
+uniform float uAtmoDensity;
+uniform vec4 uRing;         // inner, outer (planet radii), seed, enabled
+uniform vec3 uRingNormal;   // object space
+uniform float uHeightScale; // planet radii per unit of terrain height
+
+// Finer than this and float32 can no longer tell neighbouring noise cells apart.
+const float MAX_DETAIL = 1.5e5;
+// Cells per planet radius of the first fine-relief octave, which takes over from there.
+const float FINE_FREQ = 131072.0;
+
+float craters(vec3 p, float detail) {
+  float h = 0.0;
+  float freq = 2.2;
+  float amp = 1.0;
+  for (int i = 0; i < 11; i++) {
+    float fade = clamp(detail / (freq * 2.0) - 1.0, 0.0, 1.0);
+    if (fade <= 0.0) break;
+    vec3 at;
+    vec3 w = worleyAt(p * freq + uSeed, at);
+    // A crater that reaches the border of its cell fades out there rather than being cut off.
+    fade *= smoothstep(0.0, 0.1, w.z - w.x);
+    float r = 0.12 + 0.19 * w.y;
+    float d = w.x / r;
+    float bowl = (smoothstep(0.0, 1.0, d) - 1.0) * 0.6;           // depression
+    float rim = exp(-pow((d - 1.0) * 5.0, 2.0)) * 0.45;           // raised rim
+    // Basins are shallow for their width; small craters are bowls of constant proportions.
+    float depth = min(amp, 0.6 / (freq * uHeightScale));
+    h += depth * fade * (d < 1.0 ? bowl + rim : rim);
+    freq *= 2.3;
+    amp *= 0.7;
+  }
+  return h;
+}
+
+// Direction to equirectangular texture coordinates: longitude 0 at +x, east towards -z, north up.
+vec2 equirect(vec3 n) {
+  return vec2(atan(-n.z, n.x) * 0.15915494 + 0.5, asin(clamp(n.y, -1.0, 1.0)) * 0.31830989 + 0.5);
+}
+
+float seaLevelH() {
+  return 0.5 + (uSea - 0.5) * 0.45;
+}
+
+// Noise-space position of a direction, bent so continents do not look like plain noise.
+vec3 warped(vec3 p) {
+  vec3 q = p * 1.7 + uSeed;
+  return q + 0.45 * (vec3(vnoise(q * 1.3 + 1.1), vnoise(q * 1.3 + 4.7), vnoise(q * 1.3 + 8.3)) - 0.5);
+}
+
+// Set by terrain(): 1 where the ground is the level surface of a flooded (or silted-up) basin.
+float gBasin;
+
+const float BASIN_FREQ = 14.0;
+
+// Ancient impact basins: a level floor inside a ring wall, which the mountain noise then
+// carves into a crown of ridges. Returns the level liquid stands at, or -1 outside.
+float basin(vec3 p, inout float h, inout float mount) {
+  vec3 at;
+  vec3 shift = vec3(uSeed * 1.3 + 11.0);
+  vec3 w = worleyAt(p * BASIN_FREQ + shift, at);
+  float share = uType == 0 ? 0.06 : 0.07;
+  if (w.y > share) return -1.0;
+  float pick = w.y / share;
+  float r = 0.07 + 0.2 * pick * pick;
+  // The centre is the cell's point brought down (or up) onto the surface.
+  vec3 centre = normalize(at - shift);
+  float d = length(p - centre) * BASIN_FREQ / r;
+  // Nothing of the basin is left by the border of its cell, nor far outside the rim.
+  float k = smoothstep(0.0, 0.1, w.z - w.x) * (1.0 - smoothstep(1.3, 1.7, d));
+  if (k <= 0.0) return -1.0;
+  // Everything about the basin hangs off the ground height at its centre, so it is one level all round.
+  float hc = fbm(warped(centre), 24.0);
+  float deep = 0.025 + 0.05 * fract(pick * 7.0);
+  if (uType == 0) {
+    // The same lowering of the continents as in terrain(); a basin by the sea would just be a bay.
+    hc = min(hc, seaLevelH() + (hc - seaLevelH()) * 0.4);
+    deep *= 0.2;
+    if (hc - deep < seaLevelH() + 0.003) return -1.0;
+  }
+  float bed = hc - deep;
+  float wall = smoothstep(0.4, 1.0, d);
+  float crest = exp(-pow((d - 1.0) * 3.0, 2.0));
+  h = mix(h, mix(bed, max(h, bed), wall) + crest * (uType == 0 ? 0.6 : 1.0) * (0.025 + 0.03 * fract(pick * 13.0)), k);
+  mount = mix(mount, max(mount, 0.85 * crest) * smoothstep(0.3, 0.6, d), k);
+  // The level falls away towards the rim, so a breach cannot leave a wall of water standing.
+  return bed + 0.006 - 0.3 * smoothstep(0.7, 0.95, d);
+}
+
+// Returns height (roughly 0..1). Drives colouring, shading and the real geometry.
+// 'rough' reports how rugged the place is, for the fine relief layered on top
+// (negative: none at all, the surface is liquid).
+float terrain(vec3 p, float detail, out float rough) {
+  detail = min(detail, MAX_DETAIL);
+  vec3 q = warped(p);
+  float base = fbm(q, min(detail / 1.7, 250.0));
+  float h;
+  // How mountainous it is here, the relief that buys, and how hard water has worked on it.
+  float mount, amp = 0.2, erosion = 0.55, sharp = 0.8;
+  float level = -1.0;
+  gBasin = 0.0;
+  if (uType == 2) {
+    h = base * 0.6 + 0.2 + 0.16 * craters(p, detail);
+    mount = 0.5; amp = 0.06; erosion = 0.2; sharp = 0.15;
+  } else if (uType == 3) {
+    h = base * 0.7 + 0.15 - 0.25 * pow(ridged(q * 3.1, detail / 5.3), 3.0);
+    mount = 0.4; amp = 0.07; erosion = 0.5; sharp = 0.5;
+  } else if (uType == 4) {
+    h = base * 0.6 + 0.2 + 0.35 * ridged(q * 2.2, detail / 3.7);
+    mount = 0.75 * smoothstep(0.42, 0.55, h); amp = 0.12; erosion = 0.6;
+  } else {
+    float chain = ridged(q * 2.6 + 5.0, min(detail / 4.4, 40.0));
+    h = base;
+    // Continents are mostly lowland: a kilometre or so of plains, with the relief left to the mountain belts.
+    if (uType == 0) h = min(h, seaLevelH() + (h - seaLevelH()) * 0.4);
+    h += (chain - 0.25) * (uType == 0 ? 0.14 : 0.3) * smoothstep(0.42, 0.7, base);
+    // Mountain belts along the big chains, with hill country scattered between them.
+    float belt = smoothstep(0.12, 0.5, chain);
+    float zone = smoothstep(0.35, 0.65, vnoise(q * 5.0 + 2.1));
+    mount = mix(0.12, 1.0, max(belt, 0.7 * zone * zone));
+    if (uType == 1) {
+      h += 0.05 * craters(p, detail);
+      mount = max(mount, 0.3);
+    } else {
+      mount *= smoothstep(-0.015, 0.1, h - seaLevelH());
+    }
+    level = basin(p, h, mount);
+  }
+  rough = mount;
+  // Mountains: ridges tens of kilometres across down to gullies, the same physical size on
+  // any world (small worlds have taller relief per radius, so fewer cells per radius).
+  float f0 = clamp(0.63 / uHeightScale, 40.0, 150.0) * 1.7;
+  if (detail > f0 && mount > 0.0) {
+    // Gullies are cut into the mountains; the plains between them roll more gently.
+    float finest = uType == 2 ? 24.0 : mix(24.0, 200.0, smoothstep(0.12, 0.45, mount));
+    float e = eroded(p * f0 + uSeed + 3.0, p, min(detail / f0, finest), erosion, sharp * smoothstep(0.3, 0.75, mount)) * 2.2 * amp;
+    if (uType == 1) {
+      // Mesa country: here and there the slopes break into steps.
+      float steps = 0.8 * smoothstep(0.55, 0.7, vnoise(q * 9.0 + 4.0));
+      float t = e / 0.045;
+      e = mix(e, (floor(t) + smoothstep(0.38, 0.62, fract(t))) * 0.045, steps * clamp(detail / (f0 * 4.0) - 1.0, 0.0, 1.0));
+    }
+    h += mount * e;
+  }
+  if (h < level) {
+    h = level;
+    gBasin = 1.0;
+    rough = -0.3;
+  }
+  return h;
+}
+
+// Metre-scale relief, continuing the terrain below what float32 can address globally.
+// fp: fine coordinates (see FINE_FREQ), wrapped to the noise period on the CPU.
+float fineRelief(vec3 fp, float detail, float rough) {
+  float d = detail / FINE_FREQ;
+  if (d <= 1.0) return 0.0;
+  return (3.0e-6 / uHeightScale) * (0.3 + rough) * (pfbm(fp, d) - 0.5);
+}
+
+// Height above the datum (sea level on wet worlds) in planet radii.
+float displacement(float h) {
+  return max(h - (uType == 0 ? seaLevelH() : 0.15), 0.0) * uHeightScale;
+}
+`;
+
+// One quadtree patch of a cube-sphere. The patch mesh sits at its own centre, so
+// everything here is a small offset from that point and survives float32.
+export const TERRAIN_VERT = /* glsl */ `
+${LOGDEPTH_VERT_PARS}
+${PLANET_COMMON}
+uniform vec3 uCubeCenter;   // patch centre on the cube face
+uniform vec3 uCubeU;        // half-extent axes on the cube face
+uniform vec3 uCubeV;
+uniform float uRadius;      // km
+uniform float uPatchDetail;
+uniform float uSkirt;       // planet radii
+uniform vec3 uView;         // patch centre relative to the camera, planet radii
+uniform vec3 uFineOrigin;   // fine coordinates of the patch centre
+uniform float logDepthBufFC;
+#ifdef SHADOW
+${SHADOW_PROJECT}
+#endif
+varying vec3 vObj;
+varying vec3 vView;
+varying vec3 vFine;
+varying float vSkirt;
+void main() {
+  vec3 d = position.x * uCubeU + position.y * uCubeV;
+  float l0 = length(uCubeCenter);
+  vec3 c1 = uCubeCenter + d;
+  float l1 = length(c1);
+  vec3 n = c1 / l1;
+  // n - normalize(centre), written so the two near-equal unit vectors never get subtracted.
+  vec3 off = d / l1 - uCubeCenter * ((2.0 * dot(uCubeCenter, d) + dot(d, d)) / ((l1 + l0) * l0 * l1));
+  vec3 fp = uFineOrigin + off * FINE_FREQ;
+  float rough;
+  float height = terrain(n, uPatchDetail, rough);
+  float h = displacement(height + fineRelief(fp, uPatchDetail, rough)) - position.z * uSkirt;
+  vObj = n;
+  vFine = fp;
+  vSkirt = position.z;
+  vView = uView + off + n * h;
+#ifdef SHADOW
+  gl_Position = shadowProject(vView);
+#else
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(uRadius * (off + n * h), 1.0);
+  ${LOGDEPTH_VERT}
+  // Logarithmic depth per vertex rather than per fragment: patches are finely tessellated, and
+  // leaving gl_FragDepth alone lets the GPU reject hidden terrain before shading it.
+  gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * logDepthBufFC - 1.0) * gl_Position.w;
+#endif
+}
+`;
+
+// Procedural weather, evaluated once per planet into an equirectangular cloud map.
+export const CLOUD_COVER = /* glsl */ `
+float cloudCover(vec3 p, float detail) {
+  if (uClouds <= 0.0) return 0.0;
+  vec3 q = p * 1.5 + uSeed * 1.7;
+  // Weather systems: a slow field decides where it is overcast and where it is clear.
+  float systems = fbm(q, min(detail, 12.0) / 1.5);
+  // Two rounds of domain warping curl the field into fronts and cyclones.
+  vec3 w = vec3(fbm(q * 1.9 + 3.1, detail / 2.9), fbm(q * 1.9 + 5.3, detail / 2.9), fbm(q * 1.9 + 7.9, detail / 2.9)) - 0.5;
+  vec3 r = q * 2.4 + 2.6 * w;
+  r += 0.5 * (vec3(vnoise(r * 2.6 + 1.3), vnoise(r * 2.6 + 4.1), vnoise(r * 2.6 + 6.7)) - 0.5);
+  float c = fbm(r, detail / 3.6);
+  float fine = fbm(r * 7.0 + 2.0 * w, detail / 25.0);
+  // Storm tracks at the equator and mid latitudes, clearer skies over the subtropics.
+  float belt = uClouds < 0.99 ? 0.045 * cos(abs(p.y) * 9.5) : 0.0;
+  c = c * 0.55 + fine * 0.25 + systems * 0.38 - 0.09 + belt;
+  float center = 0.78 - 0.52 * uClouds;
+  return smoothstep(center - 0.02, center + 0.16, c) * smoothstep(-0.25, 0.35, fine - 0.5 + c - center + 0.2);
+}
+`;
+
+// Fragment-only helpers for equirectangular maps (they need screen-space derivatives).
+export const SURFACE_MAPS = /* glsl */ `
+uniform sampler2D uCloudMap;
+uniform vec2 uCloudRot;     // cos, sin of how far the cloud deck has drifted
+
+vec4 sampleEquirect(sampler2D map, vec3 n) {
+  vec2 uv = equirect(n);
+  // Take derivatives from whichever parameterisation is continuous here, so the seam does not shimmer.
+  vec2 alt = vec2(fract(uv.x + 0.5) - 0.5, uv.y);
+  vec2 dx = dFdx(uv), dy = dFdy(uv);
+  vec2 dxa = dFdx(alt), dya = dFdy(alt);
+  if (abs(dxa.x) + abs(dya.x) < abs(dx.x) + abs(dy.x)) { dx = dxa; dy = dya; }
+  return textureGrad(map, uv, dx, dy);
+}
+
+// Cloud cover 0..1 above direction n. The map carries the weather; noise adds the wisps a map cannot hold.
+float cloudAt(vec3 n, float detail) {
+  if (uClouds <= 0.0) return 0.0;
+  vec3 q = vec3(uCloudRot.x * n.x - uCloudRot.y * n.z, n.y, uCloudRot.y * n.x + uCloudRot.x * n.z);
+  float c = sampleEquirect(uCloudMap, q).r;
+  float edge = 4.0 * c * (1.0 - c);
+  if (detail > 700.0 && edge > 0.01) {
+    c = clamp(c + edge * 0.9 * (fbm(q * 600.0 + 3.0, min(detail / 600.0, 40.0)) - 0.5), 0.0, 1.0);
+  }
+  return c;
+}
+`;
+
+export const PLANET_FRAG = /* glsl */ `
+${LOGDEPTH_FRAG_PARS}
+${PLANET_COMMON}
+${RING_DENSITY}
+${SURFACE_MAPS}
+${atmoCommon(8)}
+uniform float uAtmoTop;     // planet radii
+varying vec3 vObj;
+varying vec3 vView;         // camera to surface, planet radii
+varying vec3 vFine;
+varying float vSkirt;       // above zero on the curtain that hangs under a patch's edge
+${SHADOW_LOOKUP}
+
+// Height of a sea surface in fine cells: wind waves crossing each other, every octave drifting
+// at the pace water waves of that length travel. 'lost' receives the slope variance of the
+// octaves too fine for the pixels to show, which spreads the sun's reflection out instead.
+float waves(vec3 fp, float d, out float lost) {
+  float sum = 0.0;
+  lost = 0.0;
+  float freq = 1.0, amp = 0.17, speed = 0.18;
+  for (int i = 0; i < 5; i++) {
+    float fade = clamp(d / freq - 1.0, 0.0, 1.0);
+    if (fade > 0.0) {
+      // Whole multiples of the noise period, so the wrap of the clock never shows.
+      vec3 drift = mod(uTime * speed, 1024.0) * ((i & 1) == 0 ? vec3(0.75, 0.25, 0.5) : vec3(-0.5, 0.75, -0.25));
+      sum += amp / freq * fade * (pnoise(fp * freq + drift + float(i) * 19.0) - 0.5);
+    }
+    lost += (1.0 - fade * fade) * amp * amp * 0.4;
+    freq *= 2.0;
+    speed *= 1.41;
+    amp *= 0.9;
+  }
+  return sum;
+}
+
+vec3 gasColor(vec3 p, float detail, float contrast) {
+  vec3 q = p + uSeed;
+  float turb = fbm(q * vec3(3.0, 9.0, 3.0) + vec3(uTime * 0.002, 0.0, 0.0), detail / 9.0) - 0.5;
+  float lat = p.y + 0.07 * turb;
+  // Storm ovals: warp latitude bands around a few cells.
+  vec2 cell = worley(vec3(p.x * 2.5, p.y * 6.0, p.z * 2.5) + uSeed);
+  lat += 0.03 * smoothstep(0.45, 0.0, cell.x) * sin(cell.x * 30.0);
+  float bands = fbm(vec3(lat * 9.0, uSeed, 0.5), 64.0);
+  float fine = fbm(vec3(lat * 34.0 + turb * 2.0, q.x * 1.5, q.z * 1.5), detail / 34.0);
+  float v = clamp(0.5 + (bands - 0.5) * 2.4 * contrast + (fine - 0.5) * 0.6 * contrast, 0.0, 1.0);
+  vec3 c = mix(uPal[3], uPal[1], smoothstep(0.0, 0.35, v));
+  c = mix(c, uPal[0], smoothstep(0.3, 0.6, v));
+  c = mix(c, uPal[2], smoothstep(0.6, 0.95, v));
+  float pole = smoothstep(0.75, 0.98, abs(p.y));
+  return mix(c, uPal[1] * 0.7, pole * 0.6);
+}
+`;

@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "generated": "2026-11-10",
+  "conventions": {
+    "projection": "equirectangular (plate carree), 2:1, north up",
+    "longitude": "-180..+180 degrees left to right, 0 degrees (prime meridian) at the image centre, east to the right",
+    "heightEncoding": "8-bit RGB PNG; v = R*256 + G (0..65535), B = 0; metres = minMeters + v / 65535 * (maxMeters - minMeters)",
+    "heightFiltering": "load height PNGs with NO colour-space conversion (linear / NoColorSpace), no premultiply, and decode R,G before any interpolation (or use NEAREST + manual bilinear) - linearly filtering the raw R and G channels separately gives wrong values at 256-step boundaries"
+  },
+  "bodies": {
+    "earth": {
+      "color": "earth_color.jpg",
+      "night": "earth_night.jpg",
+      "clouds": "earth_clouds.jpg",
+      "height": { "file": "earth_height.png", "minMeters": -10362, "maxMeters": 6407, "bits": 16, "width": 4096, "height": 2048, "datum": "EGM2008 geoid (mean sea level = 0 m)", "includesBathymetry": true, "surface": "ice surface (top of Antarctic/Greenland ice sheets)" },
+      "sizes": { "color": [8192, 4096], "night": [4096, 2048], "clouds": [8192, 4096] },
+      "notes": { "clouds": "greyscale, white = cloud; use as alpha/intensity", "night": "city lights on a dark blue (not pure black) land/ocean base; subtract/threshold the base if used as an emissive map" }
+    },
+    "moon": {
+      "color": "moon_color.jpg",
+      "height": { "file": "moon_height.png", "minMeters": -9044, "maxMeters": 10634, "bits": 16, "width": 4096, "height": 2048, "datum": "sphere of radius 1737.4 km" },
+      "sizes": { "color": [8192, 4096] }
+    },
+    "mars": {
+      "color": "mars_color.jpg",
+      "height": { "file": "mars_height.png", "minMeters": -8160, "maxMeters": 21159, "bits": 16, "width": 4096, "height": 2048, "datum": "MOLA areoid (mean radius 3389.5 km; equatorial 3396 km)" },
+      "sizes": { "color": [8192, 4096] }
+    },
+    "mercury": { "color": "mercury_color.jpg", "sizes": { "color": [4096, 2048] } },
+    "venus": { "color": "venus_color.jpg", "surface": "venus_surface.jpg", "sizes": { "color": [4096, 2048], "surface": [4096, 2048] }, "notes": { "color": "cloud-top / atmosphere view", "surface": "radar-derived surface, false colour" } },
+    "jupiter": { "color": "jupiter_color.jpg", "sizes": { "color": [4096, 2048] } },
+    "saturn": {
+      "color": "saturn_color.jpg",
+      "ring": { "file": "saturn_ring.png", "width": 4096, "height": 250, "format": "RGBA, straight (non-premultiplied) alpha", "layout": "radial strip: u = 0 (left) is the inner edge, u = 1 (right) the outer edge; v is constant", "approxInnerRadiusKm": 74500, "approxOuterRadiusKm": 140200, "radiiNote": "radii are an estimate (C ring inner edge to F ring) inferred from the positions of the Cassini division (u~0.70) and Encke gap (u~0.95); the first ~5% of the strip is fully transparent" },
+      "sizes": { "color": [4096, 2048] }
+    },
+    "uranus": { "color": "uranus_color.jpg", "sizes": { "color": [2048, 1024] } },
+    "neptune": { "color": "neptune_color.jpg", "sizes": { "color": [2048, 1024] } },
+    "io": { "color": "io_color.jpg", "sizes": { "color": [4096, 2048] } },
+    "europa": { "color": "europa_color.jpg", "grayscale": true, "sizes": { "color": [4096, 2048] } },
+    "ganymede": { "color": "ganymede_color.jpg", "sizes": { "color": [4096, 2048] } },
+    "callisto": { "color": "callisto_color.jpg", "grayscale": true, "sizes": { "color": [4096, 2048] } },
+    "titan": { "color": "titan_color.jpg", "grayscale": true, "sizes": { "color": [2048, 1024] }, "notes": { "color": "surface albedo at 938 nm seen through the haze (not the orange visible-light appearance)" } },
+    "enceladus": { "color": "enceladus_color.jpg", "grayscale": true, "sizes": { "color": [4096, 2048] }, "notes": { "color": "high-pass-filtered mosaic (relief detail, flat albedo), brightened to Enceladus' high albedo" } },
+    "triton": { "color": "triton_color.jpg", "sizes": { "color": [2048, 1024] }, "notes": { "color": "~39% of the surface (north) was never imaged; that area is a smooth synthetic fill" } },
+    "pluto": { "color": "pluto_color.jpg", "sizes": { "color": [4096, 2048] }, "notes": { "color": "~31% of the surface (south of about -30 deg) was never imaged; that area is a smooth synthetic fill. Sputnik Planitia is at +/-180 deg (image edges)" } }
+  },
+  "sky": {
+    "milkyway": "sky_milkyway.jpg",
+    "stars": "sky_stars.jpg",
+    "sizes": { "milkyway": [8192, 4096], "stars": [8192, 4096] },
+    "coordinates": "galactic",
+    "projection": "equirectangular; galactic centre (l = 0, b = 0) at the image centre; north galactic pole at the top; galactic longitude increases to the LEFT (the sky as seen from inside the sphere)",
+    "encoding": "sRGB, tone-mapped from linear EXR with y = 1 - exp(-2 x)",
+    "notes": { "milkyway": "Milky Way glow built from faint Gaia stars; the bright Hipparcos/Tycho stars are omitted, so engine-drawn star points can be layered on top", "stars": "same map including the bright stars" }
+  },
+  "galaxies": [
+    { "file": "galaxies/m51.jpg", "name": "M51", "commonName": "Whirlpool Galaxy", "type": "spiral", "view": "face-on" },
+    { "file": "galaxies/m74.jpg", "name": "M74", "commonName": "Phantom Galaxy", "type": "spiral", "view": "face-on" },
+    { "file": "galaxies/m83.jpg", "name": "M83", "commonName": "Southern Pinwheel", "type": "barred spiral", "view": "face-on" },
+    { "file": "galaxies/ngc1232.jpg", "name": "NGC 1232", "type": "spiral", "view": "face-on" },
+    { "file": "galaxies/ngc1300.jpg", "name": "NGC 1300", "type": "barred spiral", "view": "face-on" },
+    { "file": "galaxies/m81.jpg", "name": "M81", "commonName": "Bode's Galaxy", "type": "spiral", "view": "inclined" },
+    { "file": "galaxies/ngc4414.jpg", "name": "NGC 4414", "type": "spiral", "view": "inclined" },
+    { "file": "galaxies/m104.jpg", "name": "M104", "commonName": "Sombrero Galaxy", "type": "spiral", "view": "edge-on" },
+    { "file": "galaxies/ngc4565.jpg", "name": "NGC 4565", "commonName": "Needle Galaxy", "type": "spiral", "view": "edge-on" },
+    { "file": "galaxies/ngc5866.jpg", "name": "NGC 5866", "commonName": "Spindle Galaxy", "type": "lenticular", "view": "edge-on" },
+    { "file": "galaxies/m87.jpg", "name": "M87", "commonName": "Virgo A", "type": "elliptical", "view": "n/a" },
+    { "file": "galaxies/ngc5128.jpg", "name": "NGC 5128", "commonName": "Centaurus A", "type": "elliptical", "view": "peculiar, dust lane" },
+    { "file": "galaxies/lmc.jpg", "name": "LMC", "commonName": "Large Magellanic Cloud", "type": "irregular", "view": "face-on" },
+    { "file": "galaxies/ngc4449.jpg", "name": "NGC 4449", "type": "irregular", "view": "n/a" }
+  ],
+  "galaxySprites": { "size": [1024, 1024], "background": "sky-subtracted and radially windowed to pure black at the edges/corners; intended for additive blending", "encoding": "sRGB" },
+  "credits": "CREDITS.md"
+}
