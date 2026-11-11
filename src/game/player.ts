@@ -266,6 +266,14 @@ export class Player {
       const near = 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40);
       offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
     }
+    if (ap.target.kind === 'nebula') {
+      // Arrive on the side that faces Sol, as the photographs show it: the lit face of a blister such as Orion,
+      // not the inside of the dark cloud behind it.
+      const sg = ap.target.nebula.sight;
+      const pref = q1Vec.set(sg[6], sg[7], sg[8]);
+      const near = 1 - THREE.MathUtils.smoothstep(dist / end, 1.5, 6);
+      offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
+    }
     if (ap.target.kind === 'body') {
       // Swing around to the sunlit side so arrivals show a lit, slightly gibbous disk.
       const starPos = targetPosition({ kind: 'star', star: ap.target.star }, this.anchor, simTime, q1Vec);

@@ -281,9 +281,10 @@ export class Pipeline {
         this.daylight = lit > 0 ? THREE.MathUtils.smoothstep(coverage, 0.04, 0.3) * THREE.MathUtils.smoothstep(sum / lit, -3.2, -1.2) : 0;
         // With nothing lit in view the eye dark-adapts, as far as maxExposure, until the faint light there is
         // (the glow of the galaxy) reads as a dim sky: a subtle band of light, not a glare, in the core of a disc too.
-        // (Never so far that the frame as a whole, the Milky Way behind the nebula too, becomes a glare.)
+        // (Never so far that the frame as a whole, the Milky Way behind the nebula too, becomes a glare; further
+        // when nothing in view is lit at all, as among the faint filaments of a supernova remnant.)
         const mean = all / (METER_W * METER_H);
-        const dark = Math.max(THREE.MathUtils.clamp(DARK_SKY / mean, 1, Math.max(this.maxExposure, 1)), Math.min(this.darkAdapt, Math.max(1, 0.03 / mean)));
+        const dark = Math.max(THREE.MathUtils.clamp(DARK_SKY / mean, 1, Math.max(this.maxExposure, 1)), Math.min(this.darkAdapt, Math.max(1, (lit > 0 ? 0.03 : 0.08) / mean)));
         const wanted = lit > 0 ? THREE.MathUtils.clamp(0.19 / Math.pow(2, sum / lit), this.minExposure, Math.max(this.maxExposure, this.darkAdapt)) : dark;
         let goal = THREE.MathUtils.lerp(dark, wanted, THREE.MathUtils.smoothstep(coverage, 0.03, 0.4));
         // A sun in view, however small, stops the eye down at once: the dark adaptation is gone.

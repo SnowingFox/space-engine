@@ -221,15 +221,19 @@ const ENTRIES: Entry[] = [
       // cloud, which it lights; the Bright Bar to the south-east, the dark Fish's Mouth reaching in from the east,
       // M43 round NU Ori to the north behind its own dark lane, the "wings" spreading east and west.
       model: 'hii', variant: 0, scale: [1, 0.9, 0.7], seed: 3.1,
-      p: [[0, 0.3, 1.0, 9], [1.3, 1.3, 0.45, 1.2], [0.36, 2.4, 1.1, 0.3], [0, 0, 1, -0.02], [1.6, 2.6, 0.05, 1.3], [1.3, 0, 0, 1]],
+      p: [[0, 0.3, 1.0, 9], [1.3, 1.3, 0.45, 1.2], [0.36, 2.4, 1.1, 0.3], [0, 0, 1, -0.02], [0.7, 2.6, 0.05, 1.3], [1.3, 0, 0, 1]],
       prims: [
-        { kind: 'solid', a: [-0.11, -0.005, 0.0], ra: 0.014, b: [0.005, -0.1, 0.0], rb: 0.012, density: 3, rough: 0.2, glow: 2.5 },
+        { kind: 'solid', a: [-0.125, 0.005, 0.0], ra: 0.02, b: [0.015, -0.112, 0.01], rb: 0.018, density: 0.7, rough: 0.6, glow: 3 },
         { kind: 'cloud', a: [-0.4, 0.12, 0.16], ra: 0.1, b: [-0.05, 0.035, 0.14], rb: 0.022, density: 3, rough: 0.45, glow: 0.25 },
-        { kind: 'cloud', a: [-0.3, 0.17, 0.08], ra: 0.05, b: [0.08, 0.2, 0.06], rb: 0.035, density: 2.5, rough: 0.5, glow: 0.4 },
+        { kind: 'cloud', a: [-0.22, 0.15, 0.08], ra: 0.04, b: [-0.02, 0.2, 0.06], rb: 0.028, density: 2.5, rough: 0.45, glow: 0.4 },
         { kind: 'cloud', a: [0.35, -0.25, 0.15], ra: 0.14, b: [0.15, -0.45, 0.12], rb: 0.1, density: 1.2, rough: 0.6, glow: 0.3 },
-        { kind: 'bright', a: [-0.114, 0.242, -0.03], ra: 0.075, density: 3, rough: 0.3 },
+        { kind: 'bright', a: [-0.114, 0.242, -0.03], ra: 0.05, density: 3.5, rough: 0.25 },
+        { kind: 'bright', a: [-0.11, 0.235, -0.03], ra: 0.035, b: [-0.045, 0.165, -0.02], rb: 0.014, density: 2.5, rough: 0.25 },
         { kind: 'cavity', a: [0.0, 0.0, 0.5], ra: 0.42, density: 0.85, rough: 0.4 },
-        { kind: 'bright', a: [-0.3, -0.05, -0.05], ra: 0.2, b: [0.32, -0.1, -0.05], rb: 0.18, density: 1.2, rough: 0.5 },
+        { kind: 'bright', a: [-0.1, -0.02, -0.04], ra: 0.035, b: [-0.34, -0.09, -0.06], rb: 0.04, density: 3.5, rough: 0.45 },
+        { kind: 'bright', a: [-0.34, -0.09, -0.06], ra: 0.04, b: [-0.5, -0.32, -0.06], rb: 0.03, density: 3.2, rough: 0.45 },
+        { kind: 'bright', a: [0.09, -0.02, -0.04], ra: 0.035, b: [0.32, -0.11, -0.06], rb: 0.04, density: 3.5, rough: 0.45 },
+        { kind: 'bright', a: [0.32, -0.11, -0.06], ra: 0.04, b: [0.44, -0.34, -0.06], rb: 0.03, density: 3.2, rough: 0.45 },
       ],
       glows: [{ at: [0.007, 0.003, 0.0], sigma: 0.025, color: [0.75, 1.0, 0.9], amount: 25 }],
     },
@@ -250,7 +254,7 @@ const ENTRIES: Entry[] = [
       // A thick ring (open towards and away from Sol) round the hole; [O III] on its inner wall; the elephant
       // trunks and globules of its north-western rim point in at the cluster.
       model: 'hii', variant: 0, scale: [1, 0.92, 0.88], seed: 7.7,
-      p: [[0.34, 0.06, 0.95, 0], [1.0, 1.1, 0.05, 1.0], [0.28, 2.6, 1.1, 0.5], [0, 0, 1, -2], [0, 0, 0.1, 1], [1.2, 0.75, 0, 1]],
+      p: [[0.34, 0.06, 0.95, 0], [1.0, 1.1, 0.05, 1.0], [0.28, 2.6, 1.1, 0], [0, 0, 1, -2], [0, 0, 0.1, 1], [1.2, 0.75, 0, 1]],
       prims: [
         { kind: 'solid', a: [0.36, 0.42, 0.02], ra: 0.03, b: [0.24, 0.27, 0.0], rb: 0.016, density: 3, rough: 0.35, glow: 1 },
         { kind: 'solid', a: [0.5, 0.25, -0.03], ra: 0.026, b: [0.33, 0.16, -0.02], rb: 0.014, density: 3, rough: 0.35, glow: 1 },
@@ -277,39 +281,38 @@ const ENTRIES: Entry[] = [
       // Long east to west: the bright western half with the Hourglass round Herschel 36, the dark "lagoon" curving
       // north to south across the middle, the cluster NGC 6530 and Bok globules in the fainter eastern half.
       model: 'hii', variant: 0, scale: [1, 0.45, 0.5], seed: 13.3,
-      p: [[0, 0.3, 0.95, 1], [1.0, 1.0, 0.25, 1.6], [0.34, 2.8, 1.05, 0.08], [0.3, 0.1, 0.95, -0.25], [0.6, 0.8, 0.12, 1], [1.2, 0, 0, 1]],
+      p: [[0, 0.3, 0.95, 1.5], [1.0, 1.0, 0.25, 1.6], [0.14, 2.2, 0.75, 0], [0, 0, 1, -2], [0, 0, 0.1, 1], [0.6, 0, 0, 1]],
       prims: [
         { kind: 'cloud', a: [-0.32, -0.04, 0.06], ra: 0.02, density: 4, rough: 0.3, glow: 0.5 },
         { kind: 'cloud', a: [-0.38, 0.06, 0.02], ra: 0.016, density: 4, rough: 0.3, glow: 0.5 },
         { kind: 'cloud', a: [-0.27, 0.1, 0.04], ra: 0.014, density: 4, rough: 0.3, glow: 0.5 },
-        { kind: 'cloud', a: [-0.12, 0.34, 0.12], ra: 0.05, b: [-0.2, 0.02, 0.12], rb: 0.045, density: 3, rough: 0.5, glow: 0.9 },
-        { kind: 'cloud', a: [-0.2, 0.02, 0.12], ra: 0.045, b: [-0.13, -0.32, 0.12], rb: 0.05, density: 3, rough: 0.5, glow: 0.9 },
-        { kind: 'bright', a: [-0.016, 0.011, 0.03], ra: 0.08, density: 1.2, rough: 0.4 },
-        { kind: 'bright', a: [0.25, 0.0, 0.0], ra: 0.25, b: [-0.05, 0.0, 0.0], rb: 0.2, density: 1.2, rough: 0.5 },
-        { kind: 'cavity', a: [-0.45, 0.0, 0.0], ra: 0.2, density: 0.5, rough: 0.6 },
+        { kind: 'cloud', a: [-0.1, 0.36, 0.12], ra: 0.06, b: [-0.17, 0.02, 0.12], rb: 0.07, density: 2.2, rough: 0.35, glow: 0.5 },
+        { kind: 'cloud', a: [-0.17, 0.02, 0.12], ra: 0.07, b: [-0.11, -0.34, 0.12], rb: 0.06, density: 2.2, rough: 0.35, glow: 0.5 },
+        { kind: 'bright', a: [-0.016, 0.011, 0.03], ra: 0.05, density: 3, rough: 0.3 },
+        { kind: 'bright', a: [-0.04, 0.0, 0.0], ra: 0.17, b: [0.3, 0.0, 0.0], rb: 0.15, density: 1.6, rough: 0.35 },
       ],
       glows: [
-        { at: [-0.016, 0.019, 0.036], sigma: 0.006, color: [0.85, 1.0, 0.95], amount: 30 },
-        { at: [-0.016, 0.003, 0.036], sigma: 0.006, color: [0.85, 1.0, 0.95], amount: 30 },
+        { at: [-0.016, 0.024, 0.036], sigma: 0.011, color: [0.9, 1.0, 0.95], amount: 45 },
+        { at: [-0.016, -0.002, 0.036], sigma: 0.011, color: [0.9, 1.0, 0.95], amount: 45 },
       ],
     },
   },
   {
     name: 'Trifid Nebula', aliases: ['M20', 'NGC 6514'],
     kind: 'emission', type: 'H II region and reflection nebula', ra: '18 02 23', dec: '-23 01 48', dist: 4100, radius: 21,
-    sb: 20.5, av: 1.0,
+    sb: 20.0, av: 1.0,
     note: 'Three dark lanes divide its red glow; to the north, dust scatters blue starlight.',
     stars: [s('HD 164492 A', '18 02 23.55', '-23 01 51.1', 0, 37000, 1.5e5, 'O7.5III')],
     look: {
       // The round red H II region split into three lobes by dark lanes meeting near its star; north of it, a
       // separate cloud of dust shining blue.
       model: 'hii', variant: 0, scale: [1, 1, 0.9], seed: 21.9,
-      p: [[0, 0.3, 0.8, 2], [1.0, 0.9, 0.3, 1.2], [0.25, 2.4, 0.9, 0.2], [0, 0, 1, -2], [0, 0, 0.1, 1], [0.8, 0, 0, 0.3]],
+      p: [[0, 0.3, 0.9, 0.2], [0.7, 0.9, 0.3, 1.6], [0.18, 2.4, 0.5, 0], [0, 0, 1, -2], [0, 0, 0.1, 1], [0.5, 0, 0, 0.3]],
       prims: [
-        { kind: 'cloud', a: [0.03, 0.02, 0.06], ra: 0.018, b: [0.17, 0.24, 0.06], rb: 0.03, density: 3, rough: 0.4, glow: 0.8 },
-        { kind: 'cloud', a: [0.03, 0.0, 0.06], ra: 0.018, b: [-0.3, 0.06, 0.05], rb: 0.032, density: 3, rough: 0.4, glow: 0.8 },
-        { kind: 'cloud', a: [0.03, -0.02, 0.06], ra: 0.018, b: [0.07, -0.3, 0.05], rb: 0.03, density: 3, rough: 0.4, glow: 0.8 },
-        { kind: 'reflect', a: [-0.04, 0.62, -0.05], ra: 0.34, density: 2.0, rough: 0.6 },
+        { kind: 'cloud', a: [0.05, 0.06, 0.06], ra: 0.012, b: [0.2, 0.3, 0.06], rb: 0.04, density: 1.3, rough: 0.4, glow: 0.8 },
+        { kind: 'cloud', a: [-0.05, 0.01, 0.06], ra: 0.012, b: [-0.36, 0.07, 0.05], rb: 0.045, density: 1.3, rough: 0.4, glow: 0.8 },
+        { kind: 'cloud', a: [0.02, -0.06, 0.06], ra: 0.012, b: [0.08, -0.36, 0.05], rb: 0.04, density: 1.3, rough: 0.4, glow: 0.8 },
+        { kind: 'reflect', a: [-0.04, 0.64, -0.05], ra: 0.3, density: 0.5, rough: 0.6 },
       ],
     },
   },

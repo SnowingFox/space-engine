@@ -24,7 +24,7 @@ export function surfaceBrightness(mu: number): number {
  * Dark adaptation: how far the exposure may open up when a nebula fills the view (the pipeline's meter ignores
  * light this faint), and what its typical light is brought to.
  */
-const ADAPT_MAX = 64;
+const ADAPT_MAX = 160;
 const ADAPT_TARGET = 0.035;
 /** Radius on screen (device px) over which a nebula moves from the full-resolution pass to the reduced one. */
 const BIG_PX: [number, number] = [140, 240];
@@ -42,6 +42,13 @@ const BAKE_LAYERS = 4;
 /** Volumes kept at once (8 MB each): the nearest nebulae within BAKE_REACH radii. */
 const BAKE_SLOTS = 3;
 const BAKE_REACH = 9;
+// Close up, a second, finer level: a cube round the camera (in the nebula's frame, so it stays put in space),
+// baked again when the camera has moved on by a quarter of it, into the other of two volumes, and swapped in
+// once complete.
+const FINE_N = 96;
+/** Half the side of the fine cube, radii (its grid: 4 times finer than the coarse one's). */
+const FINE_HALF = 0.19;
+const FINE_LAYERS = 12;
 /** Models baked: the ones whose march is expensive (the shells of supernova remnants and planetary nebulae are not). */
 const BAKED_MODELS = new Set(['hii', 'refl']);
 
@@ -164,6 +171,14 @@ interface Item {
   layer: number;
 }
 
+interface Fine {
+  rt: THREE.WebGL3DRenderTarget;
+  /** Centre (shape frame, radii) and owner of what it holds; layers done. */
+  centre: THREE.Vector3;
+  owner: Item | null;
+  layer: number;
+}
+
 interface Vol {
   rt: THREE.WebGL3DRenderTarget;
   owner: Item | null;
@@ -186,6 +201,9 @@ export class Nebulae {
   private readonly bakeQuad: THREE.Mesh;
   private readonly bakeCam = new THREE.OrthographicCamera();
   private readonly vols: Vol[] = [];
+  private readonly fine: Fine[] = [];
+  /** Which of the two fine volumes is shown (the other is the one being baked). */
+  private fineShown = -1;
   /** A placeholder volume, so the baked programs can be compiled before anything is baked. */
   private readonly noVol = new THREE.Data3DTexture(new Uint16Array(4), 1, 1, 1);
   private ready = false;
@@ -201,8 +219,9 @@ export class Nebulae {
   /** Debug: scale of the step counts, and a switch for the whole layer. */
   stepScale = 1;
   enabled = true;
-  /** Debug: march the models themselves even where a baked volume is ready. */
+  /** Debug: march the models themselves even where a baked volume is ready; no finer level round the camera. */
   noBake = false;
+  noFine = false;
 
   constructor() {
     const quad = new THREE.PlaneGeometry(2, 2);
@@ -249,6 +268,7 @@ export class Nebulae {
         uFocus: { value: focus }, uDust: { value: 1 },
         uPr: { value: pr }, uPrN: { value: prims.length }, uLiveN: { value: live },
         uGlow: { value: gl }, uGlowN: { value: Math.min(n.look.glows?.length ?? 0, MAX_GLOWS) },
+        uFine: { value: this.noVol }, uFineBox: { value: new THREE.Vector4(0, 0, 0, 0) }, uFineVoxel: { value: (2 * FINE_HALF) / FINE_N },
       };
       const make = (): THREE.ShaderMaterial => new THREE.ShaderMaterial({
         vertexShader: NEBULA_VERT, fragmentShader: nebulaFragment(family),
@@ -259,7 +279,7 @@ export class Nebulae {
       const bakeable = BAKED_MODELS.has(n.look.model) || (n.look.model === 'snr' && n.look.variant === 0);
       const bakeMat = bakeable ? new THREE.ShaderMaterial({
         vertexShader: BAKE_VERT, fragmentShader: nebulaFragment(family, 'bake'),
-        uniforms: { ...uniforms, uLayer: { value: 0 }, uN: { value: BAKE_N } },
+        uniforms: { ...uniforms, uLayer: { value: 0 }, uN: { value: BAKE_N }, uBox: { value: new THREE.Vector4(0, 0, 0, 1) } },
         blending: THREE.NoBlending, depthTest: false, depthWrite: false, toneMapped: false,
       }) : null;
       const bakedOf = (m: THREE.ShaderMaterial): THREE.ShaderMaterial | null => bakeable ? new THREE.ShaderMaterial({
@@ -612,19 +632,72 @@ export class Nebulae {
       it.layer = 0;
     }
     const job = want.find((it) => it.vol && it.layer < BAKE_N);
-    if (!job) return;
+    if (job) {
+      const prev = renderer.getRenderTarget();
+      this.bakeQuad.material = job.bakeMat!;
+      const u = job.bakeMat!.uniforms;
+      u.uN.value = BAKE_N;
+      (u.uBox.value as THREE.Vector4).set(0, 0, 0, 1);
+      for (let i = 0; i < layers && job.layer < BAKE_N; i++, job.layer++) {
+        u.uLayer.value = job.layer;
+        renderer.setRenderTarget(job.vol!.rt, job.layer);
+        renderer.render(this.bakeScene, this.bakeCam);
+      }
+      renderer.setRenderTarget(prev);
+      if (job.layer >= BAKE_N) {
+        job.softBaked!.uniforms.uVol.value = job.vol!.rt.texture;
+        job.fullBaked!.uniforms.uVol.value = job.vol!.rt.texture;
+      }
+      return;
+    }
+    this.bakeFine(renderer, !this.noFine && want[0] && span(want[0]) < 1.15 && want[0].layer >= BAKE_N ? want[0] : null);
+  }
+
+  /** The finer level round the camera, for the nebula it is in (null: none). */
+  private bakeFine(renderer: THREE.WebGLRenderer, it: Item | null): void {
+    const shown = this.fineShown >= 0 ? this.fine[this.fineShown] : null;
+    if (!it) {
+      if (shown?.owner) (shown.owner.uniforms.uFineBox.value as THREE.Vector4).w = 0;
+      this.fineShown = -1;
+      return;
+    }
+    if (this.fine.length === 0) {
+      for (let i = 0; i < 2; i++) {
+        const rt = new THREE.WebGL3DRenderTarget(FINE_N, FINE_N, FINE_N, { type: THREE.HalfFloatType, depthBuffer: false });
+        rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter;
+        rt.texture.wrapS = rt.texture.wrapT = rt.texture.wrapR = THREE.ClampToEdgeWrapping;
+        this.fine.push({ rt, centre: new THREE.Vector3(1e9, 0, 0), owner: null, layer: 0 });
+      }
+    }
+    // Where the camera is, in the nebula's frame, snapped to a quarter of the cube.
+    const eye = it.uniforms.uEye.value as THREE.Vector3;
+    const cell = FINE_HALF / 2;
+    const want = v.set(Math.round(eye.x / cell) * cell, Math.round(eye.y / cell) * cell, Math.round(eye.z / cell) * cell);
+    if (shown && shown.owner === it && shown.layer >= FINE_N && shown.centre.distanceTo(want) < 1e-6) return;
+    const back = this.fine[this.fineShown === 0 ? 1 : 0];
+    if (back.owner !== it || back.centre.distanceTo(want) > 1e-6) {
+      back.owner = it;
+      back.centre.copy(want);
+      back.layer = 0;
+    }
     const prev = renderer.getRenderTarget();
-    this.bakeQuad.material = job.bakeMat!;
-    const u = job.bakeMat!.uniforms;
-    for (let i = 0; i < layers && job.layer < BAKE_N; i++, job.layer++) {
-      u.uLayer.value = job.layer;
-      renderer.setRenderTarget(job.vol!.rt, job.layer);
+    this.bakeQuad.material = it.bakeMat!;
+    const u = it.bakeMat!.uniforms;
+    u.uN.value = FINE_N;
+    (u.uBox.value as THREE.Vector4).set(back.centre.x, back.centre.y, back.centre.z, FINE_HALF);
+    for (let i = 0; i < FINE_LAYERS && back.layer < FINE_N; i++, back.layer++) {
+      u.uLayer.value = back.layer;
+      renderer.setRenderTarget(back.rt, back.layer);
       renderer.render(this.bakeScene, this.bakeCam);
     }
     renderer.setRenderTarget(prev);
-    if (job.layer >= BAKE_N) {
-      job.softBaked!.uniforms.uVol.value = job.vol!.rt.texture;
-      job.fullBaked!.uniforms.uVol.value = job.vol!.rt.texture;
+    u.uN.value = BAKE_N;
+    (u.uBox.value as THREE.Vector4).set(0, 0, 0, 1);
+    if (back.layer >= FINE_N) {
+      if (shown?.owner && shown.owner !== it) (shown.owner.uniforms.uFineBox.value as THREE.Vector4).w = 0;
+      this.fineShown = this.fine.indexOf(back);
+      it.uniforms.uFine.value = back.rt.texture;
+      (it.uniforms.uFineBox.value as THREE.Vector4).set(back.centre.x, back.centre.y, back.centre.z, FINE_HALF);
     }
   }
 

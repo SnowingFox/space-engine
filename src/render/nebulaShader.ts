@@ -116,7 +116,7 @@ vec4 n4(vec3 p) {
 vec4 fbm4(vec3 p, float oct) {
   vec4 s = vec4(0.0);
   float a = 0.5, w = 0.0;
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 9; i++) {
     float o = clamp(oct - float(i), 0.0, 1.0);
     if (o <= 0.0) break;
     s += a * mix(vec4(0.5), n4(p), o);
@@ -189,9 +189,11 @@ float primFill(int j, vec3 p, float rough) {
   vec4 A = uPr[j * 3], B = uPr[j * 3 + 1], C = uPr[j * 3 + 2];
   float d = roundCone(p, A.xyz, B.xyz, A.w, B.w);
   float size = max(A.w, B.w);
-  if (d > size * (0.5 + 1.2 * C.y)) return 0.0;
+  if (d > size * (0.8 + 1.2 * C.y)) return 0.0;
   if (rough > 0.0) d += rough * size * 1.6 * ((n4(p / (size * 0.6) + float(j) * 7.3 + uSeed).x - 0.5) + 0.5 * (n4(p / (size * 0.22) + float(j) * 3.1).y - 0.5));
-  return smoothstep(size * 0.2, -size * 0.2, d);
+  // (A dark cloud thins out gradually; the others have firmer edges.)
+  float soft = int(C.z + 0.5) == 0 ? size * 0.7 : size * 0.2;
+  return smoothstep(soft, -soft, d);
 }
 
 float gCloud;   // the molecular cloud's share of the last neutralGas()
@@ -231,7 +233,8 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   vec4 w2 = n4(q * freq * 1.1 + w.xyz * 1.5 + uSeed * 2.3) - 0.5;
   vec3 qw = q + (w.xyz + 0.45 * w2.xyz) * uP[2].x;
   // A ragged outline: the edge of the nebula wanders in and out by a large-scale field.
-  float r = length(qw) / (0.95 + 0.45 * w.w);
+  // (By as much as the gas is warped: a calm region has a calm outline.)
+  float r = length(qw) / (0.95 + 1.5 * uP[2].x * w.w);
   e = vec3(0.0);
   k = vec3(0.0);
 
@@ -282,7 +285,7 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   if (env < 0.002 && neuHere < 0.005 && refl < 0.005) return;
   // Gas is pushed and shadowed along the rays from the stars: structure stretched along them.
   vec3 qs = qw + radial * dot(qw, radial) * uP[2].w * 1.5;
-  vec4 G = fbm4(qs * freq + uSeed * 1.7, octaves(fp, freq, 6.5));
+  vec4 G = fbm4(qs * freq + uSeed * 1.7, octaves(fp, freq, 8.5));
   // About unit variance; the log-normal's tail is cut at 3 sigma (beyond, one pixel can overflow a half float).
   vec4 Z = clamp((G - 0.5) * 10.0, -3.0, 3.0);
   refl *= exp(0.9 * Z.x);
@@ -303,7 +306,10 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
     float at = min(0.015 * float((j + 1) * (j + 1) * (j + 1)), r0 * 0.9);
     sh += neutralGas(p + radial * at, true) * (j == 0 ? 2.0 : 1.0);
   }
-  flux *= exp(-3.0 * sh);
+  // (The main star's light, whose shadows these are; the others light the gas on their own.)
+  vec3 dm = uStar[0].xyz - p;
+  float main = uStar[0].w / (dot(dm, dm) + 0.0006);
+  flux -= main * (1.0 - exp(-3.0 * sh));
 
   // The gas is ionised where the starlight outweighs recombinations (flux against n^2); the neutral gas only
   // on its skin, where the starlight reaches it: the bright rims of clouds.
@@ -322,6 +328,9 @@ void medium(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   // Lit dust: blue starlight near the stars, the nebula's own red light further out (brown).
   float starShare = flux / (flux + 4.0);
   e += dust * (uP[1].z * min(flux, 60.0) * 0.03 * starShare * C_SCAT + uP[5].w * 0.025 * env * C_BROWN);
+  // Deep in a cloud, the nebula's light scattered over and over by the dust: a dim brown glow (what is left
+  // to see inside the molecular cloud behind the Trapezium, besides its stars).
+  e += dust * 0.012 * C_BROWN;
   e += refl * min(flux, 80.0) * 0.25 * C_SCAT;
   k = (dust + refl * 0.3) * 6.0 * C_DUST * (1.0 - smoothstep(0.5, 1.0, r));
 }
@@ -374,6 +383,9 @@ void solids(vec3 ro, vec3 rd, float pixel) {
       float d = roundCone(p, A.xyz, B.xyz, A.w, B.w);
       // Its surface, roughened at two scales.
       d += C.y * size * 1.4 * ((n4(p / (size * 0.6) + float(j) * 7.3 + uSeed).x - 0.5) + 0.5 * (n4(p / (size * 0.2) + float(j) * 3.1).y - 0.5));
+      // (And finer still, as far as a pixel there resolves it.)
+      float fine = clamp(size * 0.07 / max(pixel * t, 1e-9) - 1.0, 0.0, 1.0);
+      if (fine > 0.0) d += fine * C.y * size * 0.35 * (n4(p / (size * 0.06) + float(j) * 1.7).z - 0.5);
       vec3 ap = p - A.xyz;
       vec3 nrm = normalize(ap - u * clamp(dot(ap, u), 0.0, al));
       float facing = smoothstep(-0.2, 0.8, dot(nrm, toStar));
@@ -717,17 +729,34 @@ void main() {
 const BAKED = /* glsl */ `
 uniform highp sampler3D uVol;
 uniform float uVoxel;   // grid spacing, radii
+// A finer level around the camera: centre and half-size (radii; 0: none), its own grid spacing.
+uniform highp sampler3D uFine;
+uniform vec4 uFineBox;
+uniform float uFineVoxel;
 void baked(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
   vec4 v = textureLod(uVol, p * 0.5 + 0.5, 0.0);
+  float voxel = uVoxel;
+  if (uFineBox.w > 0.0) {
+    vec3 f = (p - uFineBox.xyz) / uFineBox.w;
+    float edge = max(abs(f.x), max(abs(f.y), abs(f.z)));
+    if (edge < 1.0) {
+      float w = 1.0 - smoothstep(0.7, 0.95, edge);
+      v = mix(v, textureLod(uFine, f * 0.5 + 0.5, 0.0), w);
+      voxel = mix(uVoxel, uFineVoxel, w);
+    }
+  }
   // Below the grid's resolution, more of the same turbulence: a log-normal factor on the density
   // (squared for the emission), fading in as the footprint of a pixel gets finer than the grid.
   // (Never finer than the steps either: detail between two samples only shows up as speckle.)
-  float more = clamp(log2(uVoxel / max(max(fp, dt * 0.7), 1e-6)), 0.0, 2.0);
+  float more = clamp(log2(voxel / max(max(fp, dt * 0.7), 1e-6)), 0.0, 2.0);
   float m = 1.0;
   if (more > 0.0 && v.a + v.r > 1e-5) {
-    vec3 dq = p * (1.5 / uVoxel) + uSeed;
-    float z = (n4(dq).x - 0.5) + 0.5 * clamp(more - 1.0, 0.0, 1.0) * (n4(ROT * dq * 2.1).y - 0.5);
-    m = exp((0.9 * z - 0.02) * min(more, 1.0));
+    // Filaments (thin sheets, where a field crosses its middle) more than blobs: what turbulent gas shows close up.
+    vec3 dq = p * (1.2 / voxel) + uSeed;
+    vec4 a = n4(dq), b = n4(ROT * dq * 2.1);
+    float sheet = exp(-pow((a.x - 0.5) * 7.0, 2.0)) * 0.8 + 0.5 * clamp(more - 1.0, 0.0, 1.0) * exp(-pow((b.y - 0.5) * 7.0, 2.0));
+    float z = 1.4 * (sheet - 0.35) + 0.6 * (a.z - 0.5);
+    m = exp(z * min(more, 1.0));
   }
   e = v.rgb * m * m;
   k = v.a * m * C_DUST;
@@ -737,11 +766,13 @@ void baked(vec3 p, float fp, float dt, out vec3 e, out vec3 k) {
 const BAKE_MAIN = /* glsl */ `
 uniform float uLayer;
 uniform float uN;
+uniform vec4 uBox;   // the cube baked: centre, half-size (radii)
 void main() {
-  vec3 p = vec3(gl_FragCoord.xy, uLayer + 0.5) / uN * 2.0 - 1.0;
+  vec3 p = uBox.xyz + (vec3(gl_FragCoord.xy, uLayer + 0.5) / uN * 2.0 - 1.0) * uBox.w;
   gRd = vec3(0.0, 0.0, -1.0);
   vec3 e, k;
-  medium(p, 1.0 / uN, 2.0 / uN, e, k);
+  float voxel = 2.0 * uBox.w / uN;
+  medium(p, voxel * 0.5, voxel, e, k);
   // (Half floats: keep it finite.)
   gl_FragColor = vec4(min(e, vec3(3e3)), min(k.g, 3e3));
 }
