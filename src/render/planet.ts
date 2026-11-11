@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import type { BodyData, PlanetType } from '../universe/bodies';
 import { ATMO_EXTINCT_FRAG, ATMO_FRAG, RING_FRAG, WORLD_VERT } from './atmosphereShader';
 import { Aurora, auroraStrength } from './aurora';
+import { BodyMaps, noMapUniforms } from './bodyMaps';
 import { PLANET_FRAG, PLANET_VERT } from './planetShader';
-import { CLOUD_BAKE_FRAG, CLOUD_FRAG, PLANET_FRAG_MAIN, PROBE_FRAG } from './planetShaderMain';
+import { CLOUD_BAKE_FRAG, CLOUD_FRAG, PLANET_FRAG_MAIN, PROBE_FRAG, RING_MAP_FRAG } from './planetShaderMain';
 import { bake, makeProbeMaterial, probe } from './probe';
 import { Terrain, fineCoord } from './terrain';
 import { TerrainShadow } from './terrainShadow';
@@ -58,6 +59,9 @@ export class PlanetView {
   private readonly aurora: Aurora | null = null;
   /** Procedural weather, painted once the planet is close enough to show it. */
   private cloudMap: THREE.WebGLRenderTarget | null = null;
+  /** Real maps (Solar System bodies), loaded while the body is near. */
+  private readonly maps: BodyMaps | null;
+  private groundReady = false;
 
   constructor(readonly body: BodyData, sunColor: THREE.Color) {
     geoHi ??= cubeSphere(96);
@@ -76,7 +80,8 @@ export class PlanetView {
       : new THREE.Color(0.95, 0.96, 0.98);
     // Small worlds are lumpier: relief shrinks more slowly than radius.
     this.heightScale = solid ? 0.0042 * THREE.MathUtils.clamp(Math.pow(6371 / body.radius, 0.85), 0.7, 6) : 0;
-    const cloudAlt = Math.max(this.heightScale * 0.45, 0.0015);
+    // An overcast deck (Venus, Titan) must clear the highest mountains, or they poke through it.
+    const cloudAlt = Math.max(this.heightScale * (body.clouds >= 0.99 ? 1.2 : 0.45), 0.0015);
     // Air thins out fast: a rocky world's sky ends a few scale heights up, well inside low orbit.
     const top = this.atmoTop = 1 + (a?.height ?? 0) * (solid ? 0.55 : 1);
 
@@ -103,12 +108,24 @@ export class PlanetView {
       uRingNormal: { value: new THREE.Vector3(0, 1, 0) },
       uHeightScale: { value: this.heightScale },
     };
+    this.maps = BodyMaps.for(body);
+    Object.assign(this.uniforms, this.maps?.uniforms ?? noMapUniforms());
+    let maxHeight = this.heightScale * 1.05;
+    if (this.maps?.hasHeight && solid) {
+      // Real relief in terrain units: the datum is sea level on Earth, the lowest point elsewhere.
+      const unitsPerKm = 1 / (body.radius * this.heightScale);
+      this.maps.setHeightScale(unitsPerKm, type === 0 ? 0 : this.maps.minKm);
+      maxHeight = Math.max(maxHeight, (this.maps.reliefKm * unitsPerKm + 0.15) * this.heightScale);
+    }
+    if (this.maps?.hasClouds) {
+      this.maps.onClouds = (map) => { this.uniforms.uCloudMap.value = map ?? blankMap; };
+    }
     this.group.add(this.spin);
 
     if (solid) {
       this.shadow = new TerrainShadow();
       Object.assign(this.uniforms, this.shadow.uniforms);
-      this.terrain = new Terrain(body.radius, this.uniforms, this.heightScale * 1.05);
+      this.terrain = new Terrain(body.radius, this.uniforms, maxHeight);
       this.spin.add(this.terrain.group);
       this.shadow.scene.add(this.terrain.shadowGroup);
       this.probeMat = makeProbeMaterial(PROBE_FRAG, {
@@ -194,9 +211,10 @@ export class PlanetView {
 
     if (ring) {
       geoRing ??= new THREE.RingGeometry(1, 2, 192, 1).rotateX(-Math.PI / 2);
+      const mapped = this.maps?.hasRing;
       this.ringMat = new THREE.ShaderMaterial({
         vertexShader: RING_VERT,
-        fragmentShader: RING_FRAG,
+        fragmentShader: mapped ? RING_MAP_FRAG : RING_FRAG,
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
@@ -206,6 +224,8 @@ export class PlanetView {
           uSunDir: { value: new THREE.Vector3(1, 0, 0) },
           uSunColor: { value: sunColor },
           uCamObj: { value: new THREE.Vector3() },
+          uRingMap: this.uniforms.uRingMap,
+          uRingMapOn: this.uniforms.uRingMapOn,
         },
       });
       this.materials.push(this.ringMat);
@@ -225,6 +245,11 @@ export class PlanetView {
     return this.terrain?.patchCount ?? 0;
   }
 
+  /** False until `ground` has been measured with the real heights in place (it may still move before). */
+  get ready(): boolean {
+    return this.groundReady;
+  }
+
   /**
    * rel: planet centre relative to the camera (km). sunDir: world-space unit vector to the star.
    * forward / halfAngle: the camera's view direction and half its diagonal field of view.
@@ -233,6 +258,7 @@ export class PlanetView {
     const b = this.body;
     const dist = rel.length();
     this.ground = null;
+    this.maps?.update(b.radius / dist);
     // Too small to see: the system view draws a dot instead.
     this.group.visible = b.radius / dist > 0.0006;
     if (!this.group.visible) return;
@@ -254,13 +280,14 @@ export class PlanetView {
     cam.copy(rel).multiplyScalar(-1 / b.radius).applyQuaternion(qInv).applyAxisAngle(AXIS, -angle);
     u.uTime.value = realTime;
     if (b.clouds > 0 && this.terrain) {
-      if (!this.cloudMap) this.paintClouds();
+      if (!this.cloudMap && !this.maps?.hasClouds) this.paintClouds();
       // The deck drifts east a little faster than the ground turns.
       const drift = ((simTime / (b.rotationPeriod * 9)) % 1) * Math.PI * 2;
       u.uCloudRot.value.set(Math.cos(drift), Math.sin(drift));
     }
 
     if (this.terrain && this.probeMat) {
+      const mapsReady = this.maps?.ready ?? true;
       let height = 0;
       if (dist < b.radius * 2) {
         const dir = this.probeMat.uniforms.uProbeDir.value.copy(cam).normalize();
@@ -269,6 +296,7 @@ export class PlanetView {
         if (v !== null) {
           height = v * 2 * this.heightScale;
           this.ground = b.radius * (1 + height);
+          this.groundReady = mapsReady;
         }
       }
       fwd.copy(forward).applyQuaternion(qInv).applyAxisAngle(AXIS, -angle);
@@ -313,6 +341,7 @@ export class PlanetView {
   }
 
   dispose(): void {
+    this.maps?.dispose();
     this.cloudMap?.dispose();
     this.shadow?.dispose();
     this.aurora?.dispose();

@@ -36,7 +36,7 @@ const PLANETS: Spec[] = [
       { name: 'Ganymede', type: 'barren', radius: 2634, mass: 0.025, km: 1070400, palette: [[0.07, 0.06, 0.05], [0.2, 0.18, 0.16], [0.4, 0.38, 0.35], [0.62, 0.62, 0.6]] },
       { name: 'Callisto', type: 'barren', radius: 2410, mass: 0.018, km: 1882700, palette: [[0.03, 0.025, 0.02], [0.09, 0.08, 0.07], [0.2, 0.18, 0.15], [0.5, 0.48, 0.45]] },
     ] },
-  { name: 'Saturn', type: 'gas', radius: 58232, mass: 95.2, au: 9.537, temp: 134, tilt: 26.7, day: 0.44, palette: [[0.8, 0.68, 0.44], [0.62, 0.5, 0.3], [0.9, 0.82, 0.62], [0.5, 0.38, 0.22]], atmo: { color: [0.95, 0.85, 0.6], density: 0.8 }, rings: { inner: 1.24, outer: 2.33, color: [0.82, 0.74, 0.6] },
+  { name: 'Saturn', type: 'gas', radius: 58232, mass: 95.2, au: 9.537, temp: 134, tilt: 26.7, day: 0.44, palette: [[0.8, 0.68, 0.44], [0.62, 0.5, 0.3], [0.9, 0.82, 0.62], [0.5, 0.38, 0.22]], atmo: { color: [0.95, 0.85, 0.6], density: 0.8 }, rings: { inner: 1.2794, outer: 2.4076, color: [0.82, 0.74, 0.6] },
     moons: [
       { name: 'Enceladus', type: 'ice', radius: 252, mass: 0.00002, km: 238000 },
       { name: 'Titan', type: 'desert', radius: 2575, mass: 0.0225, km: 1221870, palette: [[0.3, 0.17, 0.04], [0.55, 0.36, 0.1], [0.7, 0.5, 0.18], [0.25, 0.14, 0.04]], atmo: { color: [1.0, 0.65, 0.25], density: 2.2 } },
@@ -51,6 +51,7 @@ export function makeSolSystem(star: StarData): SystemData {
   const planets = PLANETS.map((s, i) => {
     const p = makeBody(rng, 0x5010 + i, s.name, s.type, s.temp);
     apply(p, s);
+    p.maps = s.name.toLowerCase();
     p.orbitRadius = s.au * KM_PER_AU;
     p.orbitPeriod = keplerPeriod(p.orbitRadius, GM_SUN);
     p.inclination = rng.range(-0.03, 0.03);
@@ -62,6 +63,7 @@ export function makeSolSystem(star: StarData): SystemData {
     for (const [m, ms] of (s.moons ?? []).entries()) {
       const moon = makeBody(rng, 0x5100 + i * 16 + m, ms.name, ms.type, s.temp);
       apply(moon, ms);
+      moon.maps = ms.name.toLowerCase();
       moon.rings = null;
       moon.clouds = ms.atmo ? 1 : 0;
       moon.seaLevel = 0;

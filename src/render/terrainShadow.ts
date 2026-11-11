@@ -35,12 +35,13 @@ float shadowCascade(int i, vec3 p, vec3 nrm, out float trust) {
   if (trust <= 0.0) return 1.0;
   float depth = ls.z * 0.5 + 0.5 - SHADOW_TEXEL * box.x / box.y;
   vec2 uv = ls.xy * 0.5 + 0.5;
-  // Far away one filtered tap is as sharp as the pixels are.
-  if (i == 1) return texture(uShadowMap, vec3((uv.x + 1.0) * 0.5, uv.y, depth));
+  // Four filtered taps in either cascade: a single one leaves the wide cascade's texels
+  // as stair-steps along every ridge a few kilometres off.
   float lit = 0.0;
+  float side = float(i);
   for (int k = 0; k < 4; k++) {
     vec2 o = (vec2(float(k & 1), float(k >> 1)) - 0.5) * 1.3 * SHADOW_TEXEL;
-    lit += texture(uShadowMap, vec3((uv.x + o.x) * 0.5, uv.y + o.y, depth));
+    lit += texture(uShadowMap, vec3((uv.x + o.x + side) * 0.5, uv.y + o.y, depth));
   }
   return lit * 0.25;
 }

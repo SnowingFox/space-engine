@@ -226,7 +226,7 @@ export class SettingsDialog {
       input.addEventListener('change', () => input.blur());
       this.sync_.push(show);
     };
-    const check = (label: string, key: 'labels' | 'orbits' | 'bloom', hint: string) => {
+    const check = (label: string, key: 'labels' | 'orbits' | 'bloom' | 'milkyWayPhoto', hint: string) => {
       if (settings[key] === null) return;
       el('label', 'k', body, label);
       const wrap = el('div', 'v', body);
@@ -242,6 +242,7 @@ export class SettingsDialog {
     check('Labels', 'labels', 'Shift+L');
     check('Orbits', 'orbits', 'O');
     check('Bloom', 'bloom', 'Glow around bright objects');
+    check('Milky Way photo', 'milkyWayPhoto', 'NASA sky survey instead of the model, inside the Milky Way');
     this.sync();
   }
 
@@ -255,6 +256,27 @@ const keys = (rows: [string, string][]) =>
 
 const section = (name: string, rows: [string, string][]) =>
   `<section><h3>${name}</h3><div class="keys">${keys(rows)}</div></section>`;
+
+const link = (url: string, text: string) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+const CC_BY = link('https://creativecommons.org/licenses/by/4.0/', 'CC BY 4.0');
+
+// Credit lines required by the CC BY 4.0 maps (and requested by NASA for the public-domain
+// ones); the full table, with the changes made to each file, is public/textures/CREDITS.md.
+const CREDITS_HTML = `<section class="credits"><h3>Credits</h3><ul>
+  <li>Earth (day, clouds), Mars, Mercury, Venus, Jupiter, Saturn and its rings, Uranus, Neptune:
+    ${link('https://www.solarsystemscope.com/textures/', 'Solar System Scope')}, ${CC_BY}
+    (Earth clouds converted to greyscale; Mercury, Venus and rings downsized).</li>
+  <li>Earth at night: NASA Earth Observatory / NASA GSFC (Suomi NPP VIIRS Black Marble).
+    Earth elevation: NOAA NCEI ETOPO 2022.</li>
+  <li>Moon colour and elevation: NASA's Scientific Visualization Studio, LRO LROC and LOLA teams.
+    Mars elevation: NASA MGS MOLA Science Team, PDS Geosciences Node.</li>
+  <li>Io, Europa, Ganymede, Callisto, Titan, Enceladus, Triton: NASA / JPL / Space Science Institute / USGS Astrogeology.
+    Pluto: NASA / JHUAPL / SwRI.</li>
+  <li>Star map: NASA/Goddard Space Flight Center Scientific Visualization Studio; Gaia DR2: ESA/Gaia/DPAC.</li>
+  <li>Galaxy images: NASA, ESA and The Hubble Heritage Team (STScI/AURA), S. Beckwith (STScI),
+    A. Aloisi (STScI/ESA), A. Zezas and J. Huchra (CfA); ESO; ESO/VMC Survey; ${CC_BY},
+    cropped, resized and background-subtracted.</li>
+</ul></section>`;
 
 export const HELP_HTML = `${titleBar('Controls')}
 <div class="cols">
@@ -302,4 +324,5 @@ export const HELP_HTML = `${titleBar('Controls')}
       ['\`', 'Hide / show interface'],
     ])}
   </div>
-</div>`;
+</div>
+${CREDITS_HTML}`;

@@ -194,6 +194,9 @@ kbd {
 .help .keys { display: grid; grid-template-columns: 112px 1fr; row-gap: 2px; align-items: center; }
 .help .keycap kbd { margin: 0 3px 0 0; color: var(--fg); }
 .help .keycap em { font-style: normal; color: var(--dim); margin-right: 3px; }
+.help .credits { margin-top: 14px; }
+.help .credits ul { margin: 0; padding: 0 0 0 14px; color: var(--dim); font-size: 10.5px; line-height: 1.45; max-height: 150px; overflow-y: auto; }
+.help .credits a { color: var(--fg); }
 
 .dialog.settings { width: 380px; }
 .form { display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: center; }

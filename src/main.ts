@@ -41,7 +41,13 @@ const player = new Player(sol);
 
 /** The bloom pass, if the pipeline has one that can be switched. */
 const bloomPass = (pipeline as unknown as { bloom?: { enabled: boolean } }).bloom ?? null;
-const settings: Settings = { labels: true, orbits: true, fov: 60, mouseSensitivity: 1, bloom: bloomPass ? bloomPass.enabled : null };
+const PHOTO_KEY = 'se.milkyWayPhoto';
+const settings: Settings = {
+  labels: true, orbits: true, fov: 60, mouseSensitivity: 1, bloom: bloomPass ? bloomPass.enabled : null,
+  // Remembered, so comparing the photo with the model survives reloads.
+  milkyWayPhoto: localStorage.getItem(PHOTO_KEY) === '1',
+};
+cloud.survey = settings.milkyWayPhoto;
 
 let view: SystemView | null = null;
 let selected: Target | null = null;
@@ -74,6 +80,8 @@ function applySettings(): void {
   settings.fov = THREE.MathUtils.clamp(settings.fov, MIN_FOV, MAX_FOV);
   if (view) view.showOrbits = settings.orbits;
   if (bloomPass && settings.bloom !== null) bloomPass.enabled = settings.bloom;
+  cloud.survey = settings.milkyWayPhoto;
+  try { localStorage.setItem(PHOTO_KEY, settings.milkyWayPhoto ? '1' : '0'); } catch { /* blocked: not remembered */ }
 }
 
 function select(t: Target | null): void {
@@ -456,7 +464,8 @@ function frame(now: number): void {
   }
 
   player.update(dt, input, obstacles, simTime, { pivot: orbitPivot(), fov: settings.fov, sensitivity: settings.mouseSensitivity });
-  if (hoverAlt !== null && nearBody?.view.ground != null) {
+  // Wait for the real height map too, or the ground would move once it arrives.
+  if (hoverAlt !== null && nearBody?.view.ground != null && nearBody.view.ready) {
     tmp.copy(player.local).sub(nearBody.pos).setLength(nearBody.view.ground + hoverAlt);
     player.local.copy(nearBody.pos).add(tmp);
     hoverAlt = null;
@@ -538,8 +547,9 @@ function frame(now: number): void {
     paused,
     dateMs: epoch + simTime * 1000,
     selected,
+    // (A galaxy has no surface: the distance is to its centre.)
     selectedDist: selected
-      ? Math.max(targetPosition(selected, player.anchor, simTime, tmp).distanceTo(player.local) - targetRadius(selected), 0)
+      ? Math.max(targetPosition(selected, player.anchor, simTime, tmp).distanceTo(player.local) - (selected.kind === 'galaxy' ? 0 : targetRadius(selected)), 0)
       : 0,
   }, now);
 

@@ -52,6 +52,8 @@ export interface BodyData {
   clouds: number;
   /** Strength of the polar lights (1 ≈ Earth); when absent it follows from the type and the atmosphere. */
   aurora?: number;
+  /** Key of the real surface maps under public/textures/ (Solar System bodies only). */
+  maps?: string;
   moons: BodyData[];
   parent: BodyData | null;
 }

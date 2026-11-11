@@ -18,6 +18,8 @@ export interface Settings {
   mouseSensitivity: number;
   /** null when the render pipeline does not expose a bloom switch. */
   bloom: boolean | null;
+  /** Inside the Milky Way, show the sky as photographed (NASA survey) instead of the model. */
+  milkyWayPhoto: boolean;
 }
 
 export interface HudActions {

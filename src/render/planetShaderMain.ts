@@ -1,6 +1,6 @@
 import { atmoCommon } from './atmosphereScatter';
 import { LOGDEPTH_FRAG, LOGDEPTH_FRAG_PARS } from './glsl';
-import { CLOUD_COVER, PLANET_COMMON, SURFACE_MAPS } from './planetShader';
+import { CLOUD_COVER, PLANET_COMMON, RING_DENSITY, SURFACE_MAPS } from './planetShader';
 
 /** Appended to PLANET_FRAG: surface classification + lighting. */
 export const PLANET_FRAG_MAIN = /* glsl */ `
@@ -21,11 +21,25 @@ void main() {
   float wLost = 0.0;         // slope variance of the waves too small to see
   vec3 wgrad = vec3(0.0);    // slope of the waves that can be seen
   float lat = abs(n.y);
+  float cityGrain = 0.5;     // fine ground texture, also breaks the night lights into clusters
+  // Up close a real map is magnified: from here on procedural detail fills in what it cannot hold.
+  float close = smoothstep(0.0, -3.0, log2(uMapInfo.z * 0.15915494 * 0.45 / detail));
 
   if (uType >= 5) {
-    albedo = gasColor(n, detail, uType == 5 ? 1.0 : 0.35);
+    if (uMapInfo.x > 0.5) {
+      albedo = sampleEquirect(uColorMap, n).rgb * uMapTint;
+      // Eddies finer than the map, drifting along the bands.
+      if (close > 0.0) albedo *= mix(1.0, 0.86 + 0.28 * fbm(n * vec3(60.0, 180.0, 60.0) + uSeed + vec3(uTime * 0.002, 0.0, 0.0), detail / 180.0), close);
+    } else {
+      albedo = gasColor(n, detail, uType == 5 ? 1.0 : 0.35);
+    }
   } else {
     float rough;
+    if (uHeightInfo.w > 0.5) {
+      // Where the map is hugely magnified, its height comes smoothly interpolated from the vertices.
+      gMapGivenKm = vMapKm;
+      gMapGiven = smoothstep(-5.0, -7.0, log2(uHeightInfo.z * 0.15915494 * 0.45 / detail));
+    }
     float h = terrain(n, detail, rough);
     float f0 = detail > FINE_FREQ ? fineRelief(vFine, detail, rough) : 0.0;
     // The slope comes from how the height changes across neighbouring pixels: one terrain
@@ -42,6 +56,8 @@ void main() {
     h += f0;
     // True relief up close; exaggerated from orbit, where real slopes would be invisible.
     float farK = uType == 2 ? 0.09 : uType == 3 ? 0.035 : uType == 4 ? 0.07 : 0.05;
+    // Real colour maps carry their own shading: less exaggeration, none without real heights.
+    if (uMapInfo.x > 0.5) farK = uHeightInfo.w > 0.5 ? farK * 0.4 : 0.0;
     float bumpK = mix(uHeightScale, max(uHeightScale, farK), smoothstep(1e-4, 3e-3, px));
     float snowLine = 1.0 - uPolar;
     // How steep the ground really is. From far away the slopes are not resolved yet, so
@@ -59,6 +75,7 @@ void main() {
     vec3 tp = n * f1 + uSeed;
     float tex = ((1.0 - fr) * vnoise(tp) + vnoise(tp * 2.0 + 5.0) + fr * vnoise(tp * 4.0 + 9.0)) * 0.5;
     grain = mix(grain, tex, 0.5 * smoothstep(5000.0, 20000.0, detail));
+    cityGrain = tex;
 
     if (uType == 0) {
       float seaH = seaLevelH();
@@ -134,6 +151,46 @@ void main() {
       float pulse = 0.8 + 0.2 * sin(uTime * 0.6 + h * 40.0);
       emissive = mix(uPal[3], uPal[0], smoothstep(0.0, 0.6, glow)) * glow * 3.5 * pulse;
     }
+    if (uMapInfo.x > 0.5) {
+      // The real map is the colour; the procedural ground only modulates it, and only up close.
+      vec3 m = sampleEquirect(uColorMap, n).rgb;
+      vec3 s = sqrt(m);   // close to the map's own sRGB values
+      vec3 a = m * uMapTint;
+      float white = smoothstep(0.55, 0.8, min(min(s.r, s.g), s.b));
+      float lum = dot(a, vec3(0.2126, 0.7152, 0.0722));
+      // A map texel over mountains averages snow, rock and whatever grows. Up close the snow
+      // is gathered onto the high, gentle ground (by how far the procedural relief rises above
+      // the map there) and the rest of the texel's colour is left to the ground beneath it.
+      // (Snow is grey to white; bright deserts are not, they have colour.)
+      float sMin = min(min(s.r, s.g), s.b), sMax = max(max(s.r, s.g), s.b);
+      float snowShare = smoothstep(0.3, 0.85, sMin) * (1.0 - smoothstep(0.09, 0.16, (sMax - sMin) / max(sMax, 1e-3)));
+      vec3 snowC = vec3(0.86, 0.89, 0.93) * uMapTint / max(uMapTint.g, 1e-3) * 0.9;
+      vec3 bare = snowShare > 0.0 ? max(a - snowC * snowShare, vec3(0.0)) / max(1.0 - snowShare, 0.4) : a;
+      float rise = uHeightInfo.w > 0.5 ? (h - gMapH0) / max(gMapAmp * 0.4, 1e-5) : 0.0;
+      float snowUp = smoothstep(-0.25, 0.25, rise + 2.0 * snowShare - 1.0) * (1.0 - smoothstep(0.55, 0.9, slope));
+      vec3 base = mix(a, mix(bare, snowC, snowUp), close * smoothstep(0.0, 0.1, snowShare));
+      vec3 land = base * mix(1.0, (0.8 + 0.4 * grain) * (0.9 + 0.2 * patchy), close * (1.0 - snowUp * 0.7));
+      vec3 stone = mix(vec3(dot(bare, vec3(0.2126, 0.7152, 0.0722))), bare, 0.4) * (0.75 + 0.5 * grain);
+      land = mix(land, stone, rock * close * 0.8);
+      if (uType == 0) {
+        // Woodland clumps where the map is green.
+        float green = clamp((s.g - max(s.r, s.b)) * 8.0, 0.0, 1.0);
+        float clump = smoothstep(0.42, 0.56, 0.6 * grain + 0.4 * patchy) * (1.0 - smoothstep(0.25, 0.5, slope));
+        land = mix(land, land * vec3(0.5, 0.62, 0.48) * (0.6 + 0.8 * tex), green * clump * close * 0.8);
+        // Snow slides off the cliffs.
+        // The map paints every ocean one flat blue: that is the water mask, sharper than the height map's coasts.
+        float sea = (1.0 - smoothstep(0.03, 0.09, length(s - vec3(0.1144, 0.2091, 0.4219)))) * (1.0 - white);
+        float depthKm = max((seaLevelH() - h) / max(uHeightInfo.x, 1e-6), 0.0) * uHeightInfo.w;
+        vec3 deep = mix(uPal[0] * 1.6 + vec3(0.0, 0.025, 0.03), uPal[0], smoothstep(0.0, 0.12, depthKm + 0.12 * (1.0 - uHeightInfo.w)));
+        water = sea;
+        wgrad *= sea;
+        grad *= 1.0 - sea;
+        albedo = mix(land, deep, sea);
+      } else {
+        albedo = land;
+      }
+      emissive = vec3(0.0);
+    }
     N = normalize(n - bumpK * grad - wgrad);
     ground = normalize(n - uHeightScale * grad);
   }
@@ -149,7 +206,7 @@ void main() {
       float t = -dot(n, uRingNormal) / dn;
       if (t > 0.0) {
         float r = length(n + L * t);
-        shadow = 1.0 - 0.85 * ringDensity((r - uRing.x) / (uRing.y - uRing.x), uRing.z);
+        shadow = 1.0 - 0.85 * ringOpacity((r - uRing.x) / (uRing.y - uRing.x));
       }
     }
   }
@@ -205,6 +262,14 @@ void main() {
 
   col += emissive;
   col += albedo * 0.0025;
+  if (uMapInfo.y > 0.5) {
+    // City lights past the terminator. The night map's base is a dim blue Earth; the lights are what is redder than it.
+    vec3 s = sqrt(sampleEquirect(uNightMap, n).rgb);
+    float lit = clamp((s.r - 0.55 * s.b) / 0.45, 0.0, 1.5);
+    // Up close the 3 km map is a blur: break it into clusters of lights.
+    lit *= mix(1.0, 2.0 * smoothstep(0.45, 0.75, cityGrain), close);
+    col += vec3(1.0, 0.68, 0.38) * (lit * lit * 0.5) * smoothstep(0.04, -0.12, geo) * (1.0 - water);
+  }
 
   // Aerial perspective: the air between the camera and the ground.
   if (uAtmoDensity > 0.0) {
@@ -239,6 +304,12 @@ void main() {
   vec2 tp = raySphere(uCamObj, view / dist, 0.9995);
   if (tp.x < tp.y && tp.x > 0.0 && tp.x < dist) discard;
   float c = cloudAt(n, detail);
+  vec3 tint = uCloudColor;
+  if (uMapInfo.w > 0.5) {
+    // An opaque deck with a real map of its colour.
+    tint = sampleEquirect(uCloudTint, cloudFrame(n)).rgb * 1.1;
+    c = 1.0;
+  }
   if (c < 0.004) discard;
   vec3 L = normalize(uSunDir);
   float geo = dot(n, L);
@@ -246,14 +317,14 @@ void main() {
   float c2 = cloudAt(normalize(n + (L - n * geo) * 0.012), 0.0);
   float shade = 1.0 - 0.5 * clamp((c2 - c) * 2.0 + 0.2 * c, 0.0, 1.0);
   float cdiff = clamp((geo + 0.12) / 1.12, 0.0, 1.0);
-  vec3 col = uCloudColor * uSunColor * (1.5 * cdiff * shade);
+  vec3 col = tint * uSunColor * (1.5 * cdiff * shade);
   if (uAtmoDensity > 0.0) {
     col *= atmoSunlight(p, L, uAtmoTop, uAtmoColor, uAtmoDensity);
     vec3 od;
     vec3 haze = atmoScatter(uCamObj, view / dist, dist, L, uAtmoTop, uAtmoColor, uAtmoDensity, od);
     col = col * exp(-od) + uSunColor * haze;
   }
-  gl_FragColor = vec4(col, c * 0.94);
+  gl_FragColor = vec4(col, c * (uMapInfo.w > 0.5 ? 1.0 : 0.94));
   ${LOGDEPTH_FRAG}
 }
 `;
@@ -284,5 +355,38 @@ void main() {
   float lon = (uv.x - 0.5) * 6.2831853, lat = (uv.y - 0.5) * 3.1415927;
   vec3 n = vec3(cos(lat) * cos(lon), sin(lat), -cos(lat) * sin(lon));
   gl_FragColor = vec4(vec3(cloudCover(n, uBakeSize.x / 6.2831853)), 1.0);
+}
+`;
+
+/** Rings drawn from a real map: colour and opacity from the inner edge (u = 0) to the outer. */
+export const RING_MAP_FRAG = /* glsl */ `
+${LOGDEPTH_FRAG_PARS}
+${RING_DENSITY}
+uniform vec4 uRing;       // inner, outer, seed, -
+uniform vec3 uColor;
+uniform vec3 uSunDir;     // ring object space (planet radii), towards the star
+uniform vec3 uSunColor;
+uniform vec3 uCamObj;
+uniform sampler2D uRingMap;
+uniform float uRingMapOn;
+varying vec3 vObj;
+
+void main() {
+  float r = length(vObj.xz);
+  float t = (r - uRing.x) / (uRing.y - uRing.x);
+  if (t < 0.0 || t > 1.0) discard;
+  vec4 m = uRingMapOn > 0.5 ? texture(uRingMap, vec2(t, 0.5)) : vec4(uColor, ringDensity(t, uRing.z));
+  float d = m.a;
+  if (d < 0.004) discard;
+  // Shadow of the planet (unit sphere at the origin) falling across the ring.
+  float b = dot(vObj, uSunDir);
+  float perp = sqrt(max(dot(vObj, vObj) - b * b, 0.0));
+  float shadow = b > 0.0 ? 1.0 : smoothstep(0.97, 1.03, perp);
+  // The unlit face only shows light that leaks through thin regions.
+  bool sameSide = uSunDir.y * uCamObj.y > 0.0;
+  float lit = sameSide ? 1.0 : 0.7 * (1.0 - d) + 0.04;
+  vec3 col = m.rgb * uSunColor * 1.5 * lit * shadow + m.rgb * 0.004;
+  gl_FragColor = vec4(col, d * 0.97);
+  ${LOGDEPTH_FRAG}
 }
 `;
