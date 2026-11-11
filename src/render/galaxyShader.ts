@@ -1,17 +1,12 @@
 import * as THREE from 'three';
-import { Rng } from '../core/rng';
 import { NOISE } from './glsl';
 import { GALAXIES } from '../universe/universe';
+import { NOISE_DATA, NOISE_SIZE } from '../universe/galaxyNoise';
 
 // The march reads its clouds from a tiling volume of random values: one filtered fetch per
 // octave instead of eight hashes, which is most of what a galaxy costs to draw.
-const NOISE_SIZE = 128;
-
 function makeNoise(): THREE.Data3DTexture {
-  const rng = new Rng(977);
-  const data = new Uint8Array(NOISE_SIZE ** 3);
-  for (let i = 0; i < data.length; i++) data[i] = Math.floor(rng.next() * 256);
-  const texture = new THREE.Data3DTexture(data, NOISE_SIZE, NOISE_SIZE, NOISE_SIZE);
+  const texture = new THREE.Data3DTexture(NOISE_DATA, NOISE_SIZE, NOISE_SIZE, NOISE_SIZE);
   texture.format = THREE.RedFormat;
   texture.minFilter = texture.magFilter = THREE.LinearFilter;
   texture.wrapS = texture.wrapT = texture.wrapR = THREE.RepeatWrapping;
@@ -49,6 +44,8 @@ export const galaxyKnotUniforms: Record<string, THREE.IUniform> = (() => {
 //   gB = arm count, 1 / tan(arm pitch), arm contrast, dust amount
 //   gC = bulge light per ly, disc light per ly, blueness of the arms, seed
 //   gD = bulge flattening, irregularity, brightness, bar length (1: round bulge)
+//   gE = how flocculent the arms are (broken into patches), spurs and feathers off them, how lopsided
+//        (one side's arms stronger), elongation of the disc along the bar (1: round)
 export const GALAXY_GLSL = /* glsl */ `
 ${NOISE}
 uniform highp sampler3D uNoise;
@@ -144,6 +141,41 @@ float gLane(float theta, float r, vec4 gA, vec4 gB) {
 
 const float LANE_LEAD = 0.16;
 
+// The arms of a real spiral are not a clean pattern: they wander, branch and break into patches, throw off spurs
+// and feathers at a steep angle on their outer side, and are stronger on one side of the disc than the other.
+// arm: gArm or gLane at the point (theta already warped); returns it so changed. (Matches armStructureOf on the CPU.)
+float gArmStructure(float arm, vec3 p, float theta, float r, vec4 gA, vec4 gB, vec4 gC, vec4 gE) {
+  float core = clamp((r - gA.x * 0.048) / (gA.x * 0.096), 0.0, 1.0);
+  float a = arm;
+  if (gE.y > 0.0) {
+    // Spurs: many short arcs of a much steeper pitch, just outside each arm.
+    float phase = gB.x * (theta - gB.y * log(max(r, 1.0) / (gA.x * 0.077)));
+    float side = pow(0.5 + 0.5 * cos(phase - 0.9), 3.0);
+    float spur = pow(0.5 + 0.5 * cos(7.0 * (theta - sign(gB.y) * 0.8 * log(max(r, 1.0) / (gA.x * 0.077))) + gC.w), 4.0);
+    a = max(a, mix(a, 0.35 + 0.65 * spur, gE.y * side * core));
+  }
+  if (gE.x > 0.0) {
+    // Flocculent: the arms in patches, a few kly long.
+    float patchy = gnoise(vec3(p.x, 0.0, p.z) / (gA.x * 0.07) + gC.w + 41.0);
+    a = mix(a, a * smoothstep(0.25, 0.7, patchy) * 1.5, gE.x * core);
+  }
+  if (gE.z > 0.0) a *= 1.0 + gE.z * 0.6 * cos(theta + gC.w) * core;
+  return a;
+}
+
+// Where a point lies in the disc's own pattern: how far out (in a disc stretched along its bar where it is
+// elongated, gE.w) and at what angle, the arms' wobble and wandering included.
+vec2 gDiscPolar(vec3 p, vec4 gA, vec4 gC, vec4 gE) {
+  // (Narrowed across the bar rather than drawn out along it: the galaxy stays inside its bounds.)
+  vec2 q = p.xz;
+  if (gE.w > 1.0) q.y *= gE.w;
+  float r = length(q);
+  float theta = atan(q.y, q.x);
+  theta += 0.2 * sin(r / (gA.x * 0.1) + gC.w) + 0.08 * sin(3.0 * theta + r / (gA.x * 0.048));
+  if (gE.x > 0.0) theta += gE.x * 0.7 * (gnoise(vec3(p.x, 0.0, p.z) / (gA.x * 0.16) + gC.w + 23.0) - 0.5);
+  return vec2(r, theta);
+}
+
 // Where along a step from height ya to yb to look up the clouds of a layer exp(-|y| / h): at the fraction u
 // of its column. Every pass of the sky map takes another u, so its samples spread over the dust the step
 // passes through instead of sitting on shells around the camera (which show as rings and streaks).
@@ -167,15 +199,18 @@ float gPick(float ya, float yb, float h, float u) {
 // uSettle: 0 for a single look; 1 where many jittered passes are averaged, which may then resolve
 // detail finer than a step (it averages out instead of showing as grain). Unset, it is 0.
 uniform float uSettle;
+#ifdef STEP_LIMIT
+uniform float uStepLimit;
+#endif
 #ifdef MARCH_DEPTH
 // Where along the ray the light and the dust of a march are (log distance, weighted by each): what moves on
 // screen with the camera, for reusing the last frames' marches.
 float gDL = 0.0, gWL = 0.0, gDA = 0.0, gWA = 0.0;
 #endif
-vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps, float jitter, float pixel) {
+vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, int steps, float jitter, float pixel) {
   float stepLimit = mix(1.0, 30.0, uSettle);
 #ifdef STEP_LIMIT
-  stepLimit = min(stepLimit, STEP_LIMIT);
+  stepLimit = min(stepLimit, uStepLimit);
 #endif
   float inLayer = 1.0 - smoothstep(1.0 * gA.z, 2.5 * gA.z, abs(ro.y));
   float R = gA.x * 1.2;
@@ -235,15 +270,15 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
     float bulge = ds * (fa + 4.0 * fm + fb) / 6.0;
     fa = fb;
     ta = tb;
-    float r = length(p.xz);
+    vec2 polar = gDiscPolar(p, gA, gC, gE);
+    float r = polar.x;
     // The stars nearest the camera are drawn one by one: their light is not part of the glow.
     float far = clamp((ta - 0.5 * ds) / (gA.z * 1.5), 0.0, 1.0);
     vec3 e = vec3(0.0), born = vec3(0.0);
     float tau = 0.0;
     if (gC.y > 0.0) {
-      float theta = atan(p.z, p.x);
-      theta += 0.2 * sin(r / (gA.x * 0.1) + gC.w) + 0.08 * sin(3.0 * theta + r / (gA.x * 0.048));
-      float arm = gArm(theta, r, gA, gB);
+      float theta = polar.y;
+      float arm = gArmStructure(gArm(theta, r, gA, gB), p, theta, r, gA, gB, gC, gE);
       // Far from the plane there are neither clouds nor dust to look up.
       float off = cross ? 0.0 : min(abs(ya), abs(yb));
       float clouds = off < 4.0 * gA.z ? gfbm(p / cell + gC.w, min(clamp(2.2 * cell / reach * stepLimit, 1.0, 64.0), cell / (2.0 * pixel * tb))) : 0.5;
@@ -293,7 +328,8 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       }
       // It gathers in narrow lanes along the inner edges of the arms, which the star clouds push about.
       // (Broken up and pushed about by the star clouds: real lanes are ragged arcs, not rings.)
-      float lane = gLane(theta + LANE_LEAD + 1.0 * (clouds - 0.5) + 0.35 * sway, r, gA, gB) * (0.45 + 1.1 * clouds);
+      float laneTheta = theta + LANE_LEAD + 1.0 * (clouds - 0.5) + 0.35 * sway;
+      float lane = gArmStructure(gLane(laneTheta, r, gA, gB), p, laneTheta, r, gA, gB, gC, gE) * (0.45 + 1.1 * clouds);
       float ring = smoothstep(gA.x * 0.03, gA.x * 0.1, r) * edge;
       // No dust right around the camera: up close a single cloud would fill half the sky. (The Sun sits in
       // such a cavity, the Local Bubble, a few hundred light years across; every camera carries one along.)
@@ -301,9 +337,18 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, int steps
       // of degrees and cover the sky out of the plane. (Seen from far off, nothing changes.)
       float tc = ta - 0.5 * ds;
       ring *= smoothstep(gA.x * 0.0025, gA.x * 0.006, tc) * mix(0.2, 1.0, smoothstep(gA.x * 0.01, gA.x * 0.04, tc));
-      tau = gB.w * ring * exp(-(r - 0.5 * gA.x) / (1.4 * gA.y)) * (0.1 + 2.6 * lane) * (0.1 + 1.6 * dense) * gas / 2200.0;
+      // Denser towards the centre, but only down to where the molecular ring is (some 0.35 of the radius): further in
+      // the dust thins again, gathered into narrow lanes along the bar instead of a deepening fog of clouds.
+      float inner = exp(-(max(r, 0.35 * gA.x) - 0.5 * gA.x) / (1.4 * gA.y)) * mix(1.0, 0.55, smoothstep(0.35 * gA.x, 0.15 * gA.x, r));
+      // (Inside the ring the clouds keep to the lanes: where the lane is weak there is hardly any.)
+      float inLane = smoothstep(0.42 * gA.x, 0.25 * gA.x, r);
+      float laneW = mix(0.1 + 2.6 * lane, 0.03 + 3.2 * lane * lane, inLane);
+      tau = gB.w * ring * inner * laneW * (0.1 + 1.6 * dense) * gas / 2200.0;
       }
     }
+    // The bars of irregular galaxies are no smooth bulge but a chain of star clouds.
+    float lumpy = smoothstep(0.45, 0.9, gD.y);
+    if (lumpy > 0.0) bulge *= mix(1.0, 0.25 + 1.6 * pow(gnoise(p / (gA.w * 0.45) + gC.w + 13.0), 1.5) * (0.6 + 0.8 * gnoise(p / (gA.w * 0.15) + gC.w + 3.0)), lumpy);
     e += vec3(1.0, 0.82, 0.58) * (bulgeLum * bulge);
     // Dust takes more of the blue light, so what shines through it is reddened.
     vec3 att = exp(-tau * vec3(0.8, 1.0, 1.3));

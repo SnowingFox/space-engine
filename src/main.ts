@@ -9,6 +9,7 @@ import { SCENIC_SPOTS, type BodyPose, type ScenicPose } from './game/scenic';
 import { aimPose, galacticToLocal, resolveBodyPose, spaceQuat } from './game/scenicPose';
 import { galaxyTarget, parkingDistance, sameTarget, targetName, targetPosition, targetRadius, type Target } from './game/target';
 import { GALAXIES, NAMED_GALAXIES, nearestGalaxy, type GalaxyData } from './universe/universe';
+import { COSMOS, findGalaxy, forEachGalaxy, visibleAt } from './universe/cosmos';
 import { GalaxyCloud } from './render/galaxyCloud';
 import { Nebulae } from './render/nebulae';
 import { DARK_ADAPTED, Pipeline } from './render/pipeline';
@@ -276,15 +277,16 @@ function generatedHole(b: { galaxy: GalaxyData | null; kind: string }): boolean 
 function pickGalaxy(dir: THREE.Vector3): GalaxyData | null {
   let best: GalaxyData | null = null;
   let bestScore = Infinity;
-  for (const g of GALAXIES) {
+  // (The catalogue and every galaxy generated around the camera: each point of light on the sky is one.)
+  forEachGalaxy((g) => {
     const dx = g.x - gal.x, dy = g.y - gal.y, dz = g.z - gal.z;
     const d = Math.hypot(dx, dy, dz);
-    if (d < g.radius * 1.1) continue;
+    if (d < g.radius * 1.1 || !visibleAt(g, d)) return;
     const apparent = Math.asin(Math.min(g.radius / d, 1));
     const ang = Math.acos(THREE.MathUtils.clamp((dx * dir.x + dy * dir.y + dz * dir.z) / d, -1, 1));
     const reach = Math.max(apparent * 0.7, 0.012);
     if (ang < reach && ang / reach < bestScore) { bestScore = ang / reach; best = g; }
-  }
+  });
   return best;
 }
 
@@ -329,6 +331,8 @@ function searchObjects(query: string): Target[] {
   for (const h of nebs) out.push(nebulaTarget(h.n));
   // Galaxies: the catalogued ones are listed even before anything is typed.
   const galaxies = GALAXIES.map((g) => ({ g, r: rank(g.name) })).filter((h) => h.r >= 0 && (q !== '' || h.g.id < NAMED_GALAXIES));
+  // (And, on a match, the generated ones around the camera, by their catalogue number.)
+  if (q !== '') COSMOS.forEach((g) => { const r = rank(g.name); if (r >= 0 && galaxies.length < 200) galaxies.push({ g, r }); });
   galaxies.sort((a, b) => a.r - b.r || a.g.id - b.g.id);
   for (const h of galaxies.slice(0, q === '' ? NAMED_GALAXIES : 20)) out.push(galaxyTarget(h.g));
   // Black holes: the real ones are listed before anything is typed, the generated ones (named after their galaxy) on a match.
@@ -715,7 +719,7 @@ requestAnimationFrame(frame);
 // Handy for debugging and automated screenshots from the console.
 Object.assign(window, {
   se: {
-    player, pipeline, starfield, cloud, nebulae, input, hud, settings, go, land, home, select, placeAt, hover, earth, scenic,
+    player, pipeline, starfield, cloud, nebulae, input, hud, settings, go, land, home, select, placeAt, hover, earth, scenic, cosmos: COSMOS,
     scenicSpots: SCENIC_SPOTS,
     /** Curation: turn/pitch that centre another body (planet index, moon index; -1 = the star) from a body pose. */
     scenicAim: (pose: BodyPose, planet: number, moon?: number) => aimPose(pose, sol, planet, moon),
@@ -739,7 +743,7 @@ Object.assign(window, {
     /** Debug: the direction (universe axes) of galactic longitude / latitude on Sol's sky, degrees. */
     skyDir: (l: number, b: number) => skyDirection(l, b),
     galaxy: (name: string) => {
-      const g = GALAXIES.find((x) => x.name.toLowerCase().includes(name.toLowerCase()));
+      const g = findGalaxy(name);
       return g ? galaxyTarget(g) : null;
     },
     stats: () => ({ fps, patches: nearBody?.view.patchCount ?? 0, altitude: player.altitude }),

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import puppeteer from 'puppeteer-core';
 
 const [dir, url = 'http://localhost:5173/', only = ''] = process.argv.slice(2);
-const N = 'const g=se.galaxy("NGC 5697").galaxy; const a=g.axes;';
+const N = 'const g=se.galaxy(window.__SPIRAL ?? "NGC 5697").galaxy; const a=g.axes;';
 const K = 'const L=[-0.75,0.12,0.65]; at(17000,30,0); look(...L);';
 const A = 'const g=se.galaxy("andromeda").galaxy; const d=[26000-g.x,18-g.y,900-g.z]; const l=Math.hypot(...d); window.__u=d.map(v=>v/l);';
 // name, setup, velocity (ly/s; may use t, seconds since the flight began)
@@ -45,6 +45,8 @@ for (const [name, setup, vel] of scenarios) {
     const at = (x, y, z) => { const g = { x: 0, y: 0, z: 0 }; p.galactic(g); p.local.x += (x - g.x) * LY; p.local.y += (y - g.y) * LY; p.local.z += (z - g.z) * LY; };
     const look = (x, y, z) => { const l = Math.hypot(x, y, z); const f = p.local.clone().set(x / l, y / l, z / l); p.quat.setFromUnitVectors(p.local.clone().set(0, 0, -1), f); };
     document.querySelectorAll('body > *:not(canvas)').forEach((e) => { e.style.display = 'none'; });
+    // (A generated spiral of the cosmos, 19 Mly out; before it the old generated NGC 5697.)
+    window.__SPIRAL = se.cosmos ? 'PGC 34630273004' : 'NGC 5697';
     ${process.env.PRE ?? ''};
     ${setup};
     window.__rec = { times: [], cams: [], shown: [], long: 0, go: false };

@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 root = sys.argv[1]
-print("scenario | change/frame median | p99 | max/median | still frames | shift px/frame median | jerk median, p95 (x shift) | stalls | flow twitch median, p95 | brightness pulses (max %) | frame ms median | max | >25 ms | long tasks | lag ly (median, max)")
+print("scenario | change/frame median | p99 | max/median | still frames | shift px/frame median | jerk median, p95 (x shift) | stalls | flow twitch median, p95 | grain % | boil % | brightness pulses (max %) | frame ms median | max | >25 ms | long tasks | lag ly (median, max)")
 for sc in sorted(os.listdir(root)):
     d0 = os.path.join(root, sc)
     files = sorted(glob.glob(d0 + "/f*.jpg"))
@@ -63,6 +63,40 @@ for sc in sorted(os.listdir(root)):
         if sel.sum() > 500:
             tw.append(float(np.median(np.hypot(*(f1 - f0)[sel].T)) / np.median(m[sel])))
     twitch = "%.2f, %.2f" % (np.median(tw), np.percentile(tw, 95)) if tw else "-"
+    # Grain: fine noise in the glow and dust (not the stars), relative to its brightness, frame by frame.
+    gr = []
+    for f in files[6::4]:
+        raw = np.asarray(Image.open(f).convert("L"), np.float32)
+        med5 = cv2.medianBlur(raw.astype(np.uint8), 5).astype(np.float32)
+        stars = cv2.dilate(((raw - med5) > 10).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        smooth = cv2.GaussianBlur(med5, (0, 0), 2.0)
+        sel = (~stars) & (smooth > 12)
+        if sel.sum() > 2000:
+            gr.append(float(np.sqrt(np.mean((med5 - smooth)[sel] ** 2)) / np.mean(smooth[sel]) * 100))
+    grain = "%.2f" % np.median(gr) if gr else "-"
+    # Boil: what changes from one frame to the next once the motion is taken out (each frame warped onto the
+    # next along the optical flow): grain that crawls or flickers, relative to the brightness; stars left out.
+    bo = []
+    for i in range(6, len(files) - 1, 4):
+        a = np.asarray(Image.open(files[i]).convert("L"), np.float32)
+        b = np.asarray(Image.open(files[i + 1]).convert("L"), np.float32)
+        ma = cv2.medianBlur(a.astype(np.uint8), 5).astype(np.float32)
+        mb = cv2.medianBlur(b.astype(np.uint8), 5).astype(np.float32)
+        fl = cv2.calcOpticalFlowFarneback(cv2.GaussianBlur(mb, (0, 0), 2), cv2.GaussianBlur(ma, (0, 0), 2), None, 0.5, 4, 25, 3, 5, 1.1, 0)
+        h, w = a.shape
+        gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+        wa = cv2.remap(ma, gx + fl[..., 0], gy + fl[..., 1], cv2.INTER_LINEAR)
+        stars = cv2.dilate((((a - ma) > 10) | ((b - mb) > 10)).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+        sm = cv2.GaussianBlur(mb, (0, 0), 3)
+        edge = 12
+        sel = (~stars) & (sm > 12)
+        sel[:edge] = sel[-edge:] = False
+        sel[:, :edge] = sel[:, -edge:] = False
+        d = mb - wa
+        d = d - cv2.GaussianBlur(d, (0, 0), 3)
+        if sel.sum() > 2000:
+            bo.append(float(np.sqrt(np.mean(d[sel] ** 2)) / np.mean(sm[sel]) * 100))
+    boil = "%.2f" % np.median(bo) if bo else "-"
     rec = json.load(open(os.path.join(d0, "rec.json")))
     t = np.array(rec["times"])
     dt = np.diff(t)[30:] if len(t) > 40 else np.diff(t)
@@ -72,6 +106,6 @@ for sc in sorted(os.listdir(root)):
     lags = [np.linalg.norm(np.array(s) - np.array(c)) for s, c in zip(shown, cams) if s]
     if lags:
         lag = "%.1f, %.1f" % (np.median(lags), np.max(lags))
-    print("%s | %.3f | %.3f | %.1f | %d of %d | %.2f | %.2f, %.2f | %d | %s | %d (%.1f%%) | %.1f | %.1f | %d | %d | %s" % (
-        sc, med, np.percentile(d, 99), d.max() / max(med, 1e-6), still, len(d), ms, np.median(jerk) / max(ms, 0.05), np.percentile(jerk, 95) / max(ms, 0.05), stalls, twitch, pulses, 100 * np.abs(res).max(),
+    print("%s | %.3f | %.3f | %.1f | %d of %d | %.2f | %.2f, %.2f | %d | %s | %s | %s | %d (%.1f%%) | %.1f | %.1f | %d | %d | %s" % (
+        sc, med, np.percentile(d, 99), d.max() / max(med, 1e-6), still, len(d), ms, np.median(jerk) / max(ms, 0.05), np.percentile(jerk, 95) / max(ms, 0.05), stalls, twitch, grain, boil, pulses, 100 * np.abs(res).max(),
         np.median(dt), dt.max(), int(np.sum(dt > 25)), rec["long"], lag))

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng';
 import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
+import { COSMOS } from '../universe/cosmos';
 import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { GalaxyHost } from './galaxyHost';
 import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
@@ -11,6 +12,8 @@ import { SOFT_LAYER, softLayer } from './pipeline';
 // (inside, above or near them) on screen by GalaxyHost, with many frames averaged; every other one on a
 // billboard. (Inside the disc of a spiral the surveyed sky, HomeSky, may stand in for the model.)
 const NEAR_START = 6, NEAR_END = 8;
+/** Billboard slots: the catalogue and every generated galaxy loaded around the camera. */
+const CAPACITY = 65536;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
 const BIG_PX = [650, 1000];
@@ -31,6 +34,9 @@ const INSIDE_GAIN = 0.0125 * 2.6, OUTSIDE_GAIN = INSIDE_GAIN;
 /** Brightness of the surveyed sky inside a disc, matched to the model in the Cygnus star cloud. */
 const HOME_GAIN = 0.0275 * 2.6;
 
+/** Light of a star of magnitude 8 as the starfield draws it (0.034 at magnitude 7, x 2.512^-0.7): there the glow's linear scale meets the stars' law. */
+const STAR_ANCHOR = '0.0178';
+
 const FIELD_VERT = /* glsl */ `
 attribute vec3 iPos;
 attribute vec3 iX;
@@ -40,7 +46,8 @@ attribute vec4 iA;
 attribute vec4 iB;
 attribute vec4 iC;
 attribute vec4 iD;
-attribute vec4 iGlow;   // rgb: light of the whole galaxy as one soft spot; a: its id
+attribute vec4 iE;
+attribute vec4 iGlow;   // rgb: light of the whole galaxy as one soft spot; a: its slot
 uniform vec3 uCam;
 uniform float uPixelsPerRadian;
 uniform float uFullPpr;   // pixels per radian of the full-resolution view, whichever pass this is
@@ -55,10 +62,13 @@ varying vec4 vA;
 varying vec4 vB;
 varying vec4 vC;
 varying vec4 vD;
+varying vec4 vE;
 varying vec4 vSpot;   // rgb: colour, a: falloff across the quad
 varying vec3 vMode;   // weight, 0 marched .. 1 spot, march steps
 varying vec2 vQuad;
 void main() {
+  // (A free slot.)
+  if (iA.x <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   vec3 c = iPos - uCam;
   float d = length(c);
   float bound = iA.x * 1.2;
@@ -86,10 +96,16 @@ void main() {
   vec3 world = c + (right * position.x + up * position.y) * size;
   mat3 frame = transpose(mat3(iX, iY, iZ));
   vEye = frame * -c;
-  vA = iA; vB = iB; vC = iC;
+  vA = iA; vB = iB; vC = iC; vE = iE;
   vD = vec4(iD.xy, iD.z * uBrightness, iD.w);
   float dim = 0.3 * px / sigma;
   vSpot = vec4(iGlow.rgb * (uBrightness * dim * dim), halfPx * halfPx / (2.0 * sigma * sigma));
+  // Shrunk to a point, a galaxy is drawn as a star of its magnitude would be: with the starfield's law, light
+  // going as flux^0.7, not as flux, from where the two scales meet (STAR_ANCHOR: the light of a star of magnitude
+  // 8, where the glow's linear scale is anchored). Faint galaxies then show as far as stars as faint do.
+  // (Only once it is small: as it grows, the light goes over smoothly to the march's.)
+  float total = dot(vSpot.rgb, vec3(0.3333)) * 6.2832 * sigma * sigma;
+  vSpot.rgb *= mix(1.0, pow(max(total / ${STAR_ANCHOR}, 1e-12), -0.3), smoothstep(5.0, 1.5, px));
   vec4 clip = projectionMatrix * modelViewMatrix * vec4(world, 1.0);
   // With the camera inside the bounding sphere, or close to it, a billboard cannot cover the galaxy: the whole view does.
   if (d < bound * 1.3) {
@@ -113,13 +129,14 @@ varying vec4 vA;
 varying vec4 vB;
 varying vec4 vC;
 varying vec4 vD;
+varying vec4 vE;
 varying vec4 vSpot;
 varying vec3 vMode;
 varying vec2 vQuad;
 void main() {
   vec4 col = vec4(0.0);
   if (vMode.y < 1.0) {
-    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
+    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, vE, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
   }
   if (vMode.y > 0.0) col.rgb += vSpot.rgb * (exp(-dot(vQuad, vQuad) * vSpot.a) * vMode.y);
   gl_FragColor = col * vMode.x;
@@ -131,11 +148,29 @@ attribute vec3 aColor;
 attribute float aSize;
 uniform float uPixelsPerRadian;
 uniform float uGain;
+// The galaxy around the camera as marched this frame (GalaxyHost): how much of what is behind it its dust and
+// light hide, and how far along the ray they are (log ly). A star behind the dust is dimmed and reddened by it,
+// one in front is not: the same dust, on the same screen, as the glow.
+uniform sampler2D tHost;
+uniform sampler2D tDepth;
+uniform float uHost;
 varying vec3 vColor;
 void main() {
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
   gl_PointSize = aSize * uPixelsPerRadian / 900.0;
   vColor = aColor * uGain;
+  if (uHost > 0.5 && gl_Position.w > 0.0) {
+    vec2 uv = gl_Position.xy / gl_Position.w * 0.5 + 0.5;
+    if (all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) {
+      float hide = textureLod(tHost, uv, 0.0).a;
+      float depth = exp(textureLod(tDepth, uv, 0.0).r);
+      float behind = smoothstep(0.6, 1.4, length(mv.xyz) / max(depth, 1.0));
+      // (Hidden as much as the march says, in the colours dust takes: more of the blue.)
+      float t = 1.0 - clamp(hide, 0.0, 0.999) * behind;
+      vColor *= pow(vec3(t), vec3(0.8, 1.0, 1.3));
+    }
+  }
 }
 `;
 
@@ -163,18 +198,6 @@ function glowOf(g: GalaxyData): number[] {
     disc * (0.84 - 0.09 * young) + bulge * 0.82,
     disc * (0.66 + 0.34 * young) + bulge * 0.58,
   ];
-}
-
-/** 0..1, how much of a dust lane a point of a disc is in (the march's gLane, with its lead on the arms). */
-function laneOf(g: GalaxyData, x: number, z: number): number {
-  const r = Math.max(Math.hypot(x, z), 1);
-  const th = Math.atan2(z, x);
-  const warped = th + 0.2 * Math.sin(r / (g.radius * 0.1) + g.seed) + 0.08 * Math.sin(3 * th + r / (g.radius * 0.048));
-  const phase = g.arms * (warped + 0.16 - g.pitchK * Math.log(r / (g.radius * 0.077)));
-  const major = Math.pow(0.5 + 0.5 * Math.cos(phase), 8);
-  const minor = Math.pow(0.5 + 0.5 * Math.cos(2 * phase + 1.3), 10) * 0.5;
-  const core = THREE.MathUtils.clamp((r - g.radius * 0.048) / (g.radius * 0.096), 0, 1);
-  return THREE.MathUtils.lerp(0.35, THREE.MathUtils.lerp(0.3, Math.min(1, major + minor), g.armContrast), core);
 }
 
 function gamma(rng: Rng, k: number, scale: number): number {
@@ -207,27 +230,85 @@ export class GalaxyCloud {
   /** Frames left to draw the sparkle even unseen, so its shader is compiled before it is first needed. */
   private sparkleWarm = 2;
   private readonly near: NearGalaxy[] = [];
-  private readonly eyes = GALAXIES.map(() => ({ x: 0, y: 0, z: 0 }));
-  state = { mapped: 0, gain: 0 };
+  private readonly eyes = new Map<number, { x: number; y: number; z: number }>();
+  state = { mapped: 0, gain: 0, galaxies: 0 };
+  /**
+   * The billboards: one instance per galaxy, in slots. The catalogue's are fixed (slot = id); generated ones
+   * (cosmos.ts) come and go as the camera moves, into free slots, and only the slots changed are uploaded.
+   */
+  private readonly geometry = new THREE.InstancedBufferGeometry();
+  private readonly attrs: Record<string, THREE.InstancedBufferAttribute> = {};
+  private readonly slotOf = new Map<number, number>();
+  private readonly free: number[] = [];
+  private top = 0;
+  private dirty = [Infinity, -Infinity];
+
+  /** Writes a galaxy (or, null, an empty slot) into a slot of the billboards. */
+  private write(slot: number, g: GalaxyData | null): void {
+    const a = this.attrs;
+    if (!g) {
+      a.iA.array[slot * 4] = 0;
+      a.iGlow.array[slot * 4 + 3] = -10;
+    } else {
+      a.iPos.array.set([g.x, g.y, g.z], slot * 3);
+      a.iX.array.set(g.axes.slice(0, 3), slot * 3);
+      a.iY.array.set(g.axes.slice(3, 6), slot * 3);
+      a.iZ.array.set(g.axes.slice(6, 9), slot * 3);
+      const p = galaxyParams(g, 1);
+      ['iA', 'iB', 'iC', 'iD', 'iE'].forEach((name, k) => a[name].array.set(p[k], slot * 4));
+      a.iGlow.array.set([...glowOf(g), slot], slot * 4);
+    }
+    this.dirty[0] = Math.min(this.dirty[0], slot);
+    this.dirty[1] = Math.max(this.dirty[1], slot);
+  }
+
+  /** Takes in the galaxies generated and dropped since the last frame. */
+  private stream(): void {
+    const { added, removed } = COSMOS.drain();
+    for (const g of removed) {
+      const slot = this.slotOf.get(g.id);
+      if (slot === undefined) continue;
+      this.slotOf.delete(g.id);
+      this.write(slot, null);
+      this.free.push(slot);
+    }
+    // (Lowest slots first, so that what is uploaded stays together.)
+    if (removed.length) this.free.sort((x, y) => y - x);
+    for (const g of added) {
+      if (this.slotOf.has(g.id)) continue;
+      const slot = this.free.length ? this.free.pop()! : this.top < CAPACITY ? this.top++ : -1;
+      if (slot < 0) break;
+      this.slotOf.set(g.id, slot);
+      this.write(slot, g);
+    }
+    if (this.dirty[0] <= this.dirty[1]) {
+      for (const attr of Object.values(this.attrs)) {
+        attr.clearUpdateRanges();
+        attr.addUpdateRange(this.dirty[0] * attr.itemSize, (this.dirty[1] - this.dirty[0] + 1) * attr.itemSize);
+        attr.needsUpdate = true;
+      }
+      this.dirty = [Infinity, -Infinity];
+    }
+    this.geometry.instanceCount = this.top;
+  }
 
   constructor() {
-    const n = GALAXIES.length;
     const quad = new THREE.PlaneGeometry(2, 2);
-    const geometry = new THREE.InstancedBufferGeometry();
+    const geometry = this.geometry;
     geometry.setAttribute('position', quad.getAttribute('position'));
     geometry.setIndex(quad.getIndex());
-    geometry.instanceCount = n;
-    const attribute = (name: string, width: number, of: (g: GalaxyData) => number[]): void => {
-      const data = new Float32Array(n * width);
-      GALAXIES.forEach((g, i) => data.set(of(g), i * width));
-      geometry.setAttribute(name, new THREE.InstancedBufferAttribute(data, width));
-    };
-    attribute('iPos', 3, (g) => [g.x, g.y, g.z]);
-    attribute('iX', 3, (g) => g.axes.slice(0, 3));
-    attribute('iY', 3, (g) => g.axes.slice(3, 6));
-    attribute('iZ', 3, (g) => g.axes.slice(6, 9));
-    ['iA', 'iB', 'iC', 'iD'].forEach((name, k) => attribute(name, 4, (g) => galaxyParams(g, 1)[k]));
-    attribute('iGlow', 4, (g) => [...glowOf(g), g.id]);
+    for (const [name, width] of [['iPos', 3], ['iX', 3], ['iY', 3], ['iZ', 3], ['iA', 4], ['iB', 4], ['iC', 4], ['iD', 4], ['iE', 4], ['iGlow', 4]] as const) {
+      const attr = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY * width), width);
+      attr.setUsage(THREE.DynamicDrawUsage);
+      this.attrs[name] = attr;
+      geometry.setAttribute(name, attr);
+    }
+    for (const g of GALAXIES) {
+      this.slotOf.set(g.id, g.id);
+      this.write(g.id, g);
+    }
+    this.top = GALAXIES.length;
+    geometry.instanceCount = this.top;
 
     const make = (uniforms: Record<string, THREE.IUniform>, defines: Record<string, number>): THREE.ShaderMaterial => new THREE.ShaderMaterial({
       vertexShader: FIELD_VERT, fragmentShader: FIELD_FRAG, uniforms, defines,
@@ -251,6 +332,7 @@ export class GalaxyCloud {
     const large = new THREE.Mesh(geometry, this.fieldSoft);
     large.frustumCulled = false;
     large.layers.set(SOFT_LAYER);
+    large.onBeforeRender = billboards.onBeforeRender;
     this.group.add(large);
     this.host.mesh.renderOrder = -3;
     this.home.mesh.renderOrder = -3;
@@ -259,7 +341,7 @@ export class GalaxyCloud {
     this.sparkle = new THREE.ShaderMaterial({
       vertexShader: SPARKLE_VERT,
       fragmentShader: SPARKLE_FRAG,
-      uniforms: { uPixelsPerRadian: { value: 1000 }, uGain: { value: 0 } },
+      uniforms: { uPixelsPerRadian: { value: 1000 }, uGain: { value: 0 }, tHost: { value: null }, tDepth: { value: null }, uHost: { value: 0 } },
       blending: THREE.AdditiveBlending, transparent: true, depthTest: false, depthWrite: false,
     });
   }
@@ -307,14 +389,11 @@ export class GalaxyCloud {
         y = rng.gauss() * g.height * (0.25 + 0.5 * (1 - young));
       }
       pos.set([x, y, z], i * 3);
-      // Few are bright, most barely show.
+      // Few are bright, most barely show. (The dust in front of them dims them as it dims the glow: drawn, they
+      // look up the march of this frame, SPARKLE_VERT.)
       const gain = Math.min(0.13 * Math.pow(Math.max(rng.next(), 1e-4), -0.5), 1.8);
-      // Behind the dust of the lanes (on the inner edges of the arms, as the march has them).
-      const r = Math.hypot(x, z);
-      const lane = r > g.radius * 0.03 ? laneOf(g, x, z) : 0;
-      const veil = Math.exp(-2.2 * g.dust * lane * Math.exp(-Math.abs(y) / (g.height * 0.3)));
       const tint = rng.next() < young ? [0.62, 0.78, 1.0] : rng.next() < 0.5 ? [1.0, 0.92, 0.8] : [1.0, 0.72, 0.45];
-      col.set([tint[0] * gain * Math.pow(veil, 0.8), tint[1] * gain * veil, tint[2] * gain * Math.pow(veil, 1.35)], i * 3);
+      col.set([tint[0] * gain, tint[1] * gain, tint[2] * gain], i * 3);
       size[i] = rng.range(0.8, 1.3) + 0.5 * Math.min(gain, 1.2);
     }
     const geometry = new THREE.BufferGeometry();
@@ -325,6 +404,14 @@ export class GalaxyCloud {
     points.frustumCulled = false;
     points.renderOrder = -2;
     points.matrixAutoUpdate = false;
+    // (Only the view the march was made for can read it: any other, the lens's cube map, draws them undimmed.)
+    points.onBeforeRender = (_r, _s, camera) => {
+      const u = this.sparkle.uniforms;
+      const host = this.host.output();
+      u.uHost.value = camera === this.camera && host ? 1 : 0;
+      if (host) { u.tHost.value = host.color; u.tDepth.value = host.depth; }
+      this.sparkle.uniformsNeedUpdate = true;
+    };
     return points;
   }
 
@@ -361,16 +448,25 @@ export class GalaxyCloud {
    */
   update(cam: { x: number; y: number; z: number }, pixelsPerRadian: number, gain: number, camera?: THREE.PerspectiveCamera): void {
     if (camera) this.camera = camera;
+    // The universe beyond the catalogue, generated around the camera within a budget, into the billboards.
+    COSMOS.update(cam);
+    this.stream();
+    this.state.galaxies = this.slotOf.size;
     // The galaxies near enough to be marched on screen, nearest (in their own radii) first.
     const near = this.near;
     near.length = 0;
-    for (const g of GALAXIES) {
+    const consider = (g: GalaxyData): void => {
       const d = Math.hypot(g.x - cam.x, g.y - cam.y, g.z - cam.z) / g.radius;
-      if (d >= NEAR_END) continue;
-      const eye = this.eyes[g.id];
+      if (d >= NEAR_END) return;
+      let eye = this.eyes.get(g.id);
+      if (!eye) this.eyes.set(g.id, (eye = { x: 0, y: 0, z: 0 }));
       toGalaxy(g, cam.x, cam.y, cam.z, eye);
       near.push({ galaxy: g, eye, weight: 1 - THREE.MathUtils.smoothstep(d, NEAR_START, NEAR_END) });
-    }
+    };
+    for (const g of GALAXIES) consider(g);
+    // (No generated galaxy is larger than 300 kly: within eight of its radii means within 2.4 Mly.)
+    COSMOS.near(cam.x, cam.y, cam.z, 2.4e6, consider);
+    if (this.eyes.size > 4096) this.eyes.clear();
     const span = (n: NearGalaxy): number => Math.hypot(n.eye.x, n.eye.y, n.eye.z) / n.galaxy.radius;
     near.sort((a, b) => span(a) - span(b));
     near.length = Math.min(near.length, NEAR_GALAXIES);
@@ -388,7 +484,7 @@ export class GalaxyCloud {
     // camera is: leaving the disc changes the perspective and nothing else. (What the survey shows, it leaves.)
     const mapped = Math.max(0, 1 - (this.survey ? HomeSky.cover(host) : 0));
     /** (For measuring: how much of the host the march draws, and how bright.) */
-    this.state = { mapped, gain };
+    this.state = { ...this.state, mapped, gain };
     if (this.camera && mapped > 0.002) this.host.update(near, cam, this.camera, gain * mapped, pixelsPerRadian, mapped);
     else this.host.update(NO_GALAXIES, cam, this.camera!, 0, pixelsPerRadian, 0);
 
@@ -399,7 +495,7 @@ export class GalaxyCloud {
     this.fieldSoft.uniforms.uPixelsPerRadian.value = pixelsPerRadian * softLayer.scale;
     f.uBrightness.value = gain;
     for (let i = 0; i < NEAR_GALAXIES; i++) {
-      f.uNearId.value.setComponent(i, near[i] ? near[i].galaxy.id : -1);
+      f.uNearId.value.setComponent(i, near[i] ? this.slotOf.get(near[i].galaxy.id) ?? -1 : -1);
       this.nearWeight.setComponent(i, near[i] ? 1 - near[i].weight : 0);
     }
     f.uHideClouds.value = host?.galaxy.id === 0 ? surveyed : 0;

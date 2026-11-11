@@ -12,7 +12,7 @@ const views = [
   ['Milky Way from 134 kly', 'at(0,120000,60000); look(0,-0.9,-0.45)', ''],
   ['Andromeda from 120 kly', 'const g=se.galaxy("andromeda").galaxy; const dx=26000-g.x,dy=18-g.y,dz=900-g.z,l=Math.hypot(dx,dy,dz); at(g.x+dx/l*120000,g.y+dy/l*120000,g.z+dz/l*120000); look(-dx,-dy,-dz)', ''],
   ['Milky Way from 70 kly, oblique', 'at(-30000,40000,50000); look(30000,-40000,-50000)', ''],
-  ['NGC 5697, 18.9 kly from centre', 'const g=se.galaxy("NGC 5697").galaxy; const a=g.axes; at(g.x+a[0]*18900+a[3]*700, g.y+a[1]*18900+a[4]*700, g.z+a[2]*18900+a[5]*700); look(-a[0]-a[3]*0.08,-a[1]-a[4]*0.08,-a[2]-a[5]*0.08)', ''],
+  ['NGC 5697, 18.9 kly from centre', 'const g=se.galaxy(window.__SPIRAL ?? "NGC 5697").galaxy; const a=g.axes; at(g.x+a[0]*18900+a[3]*700, g.y+a[1]*18900+a[4]*700, g.z+a[2]*18900+a[5]*700); look(-a[0]-a[3]*0.08,-a[1]-a[4]*0.08,-a[2]-a[5]*0.08)', ''],
 ];
 const browser = await puppeteer.launch({
   executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -37,6 +37,8 @@ for (const [name, setup, step] of views) {
     let last = performance.now();
     const move = (x, y, z) => { const now = performance.now(), dt = (now - last) / 1000; last = now; p.local.x += x * dt * LY; p.local.y += y * dt * LY; p.local.z += z * dt * LY; };
     document.querySelectorAll('body > *:not(canvas)').forEach((e) => { e.style.display = 'none'; });
+    // (A generated spiral of the cosmos, 19 Mly out; before it the old generated NGC 5697.)
+    window.__SPIRAL = se.cosmos ? 'PGC 34630273004' : 'NGC 5697';
     ${setup};
     const t0 = performance.now();
     const times = [];

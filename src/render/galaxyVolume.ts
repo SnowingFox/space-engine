@@ -1,19 +1,21 @@
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
-import type { GalaxyData } from '../universe/universe';
+import { armStructureOf, type GalaxyData } from '../universe/universe';
 import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { probeRenderer } from './probe';
 
 /** How many galaxies the camera can be inside of (or close to) at once. */
 export const NEAR_GALAXIES = 2;
 
-/** The march parameters of a galaxy, as the four vectors the shader expects. */
-export function galaxyParams(g: GalaxyData, brightness: number): [number[], number[], number[], number[]] {
+/** The march parameters of a galaxy, as the five vectors the shader expects. */
+export function galaxyParams(g: GalaxyData, brightness: number): [number[], number[], number[], number[], number[]] {
+  const st = armStructureOf(g);
   return [
     [g.radius, g.discScale, g.height, g.bulgeScale],
     [g.arms, g.pitchK, g.armContrast, g.dust],
     [g.bulgeLum, g.discLum, g.blue, g.seed],
     [g.bulgeFlat, g.irregular, brightness, g.bar ?? (g.kind === 'barred spiral' ? 1.8 : 1)],
+    [st.flocculent, st.spurs, st.lopsided, st.elongation],
   ];
 }
 
@@ -29,6 +31,7 @@ uniform vec4 uA[${NEAR_GALAXIES}];
 uniform vec4 uB[${NEAR_GALAXIES}];
 uniform vec4 uC[${NEAR_GALAXIES}];
 uniform vec4 uD[${NEAR_GALAXIES}];
+uniform vec4 uE[${NEAR_GALAXIES}];
 uniform mat3 uFrame[${NEAR_GALAXIES}];   // universe axes to the galaxy's own
 uniform vec3 uEye[${NEAR_GALAXIES}];     // the camera in the galaxy's frame
 uniform float uWeight[${NEAR_GALAXIES}];
@@ -59,7 +62,7 @@ void main() {
   // Nearest galaxy first: each one is seen through the dust of those before it.
   for (int i = 0; i < ${NEAR_GALAXIES}; i++) {
     if (i >= uCount) break;
-    vec4 g = galaxyMarch(uEye[i], uFrame[i] * dir, uA[i], uB[i], uC[i], uD[i], uSteps, jitter, 2.0 / uSize) * uWeight[i];
+    vec4 g = galaxyMarch(uEye[i], uFrame[i] * dir, uA[i], uB[i], uC[i], uD[i], uE[i], uSteps, jitter, 2.0 / uSize) * uWeight[i];
     sum += (1.0 - sum.a) * g;
   }
   gl_FragColor = sum;
@@ -245,7 +248,7 @@ export class GalaxyVolume {
       vertexShader: MARCH_VERT,
       fragmentShader: MARCH_FRAG,
       uniforms: {
-        uA: { value: vec4s() }, uB: { value: vec4s() }, uC: { value: vec4s() }, uD: { value: vec4s() },
+        uA: { value: vec4s() }, uB: { value: vec4s() }, uC: { value: vec4s() }, uD: { value: vec4s() }, uE: { value: vec4s() },
         uFrame: { value: Array.from({ length: NEAR_GALAXIES }, () => new THREE.Matrix3()) },
         uEye: { value: Array.from({ length: NEAR_GALAXIES }, () => new THREE.Vector3()) },
         uWeight: { value: new Array(NEAR_GALAXIES).fill(0) },
@@ -433,11 +436,12 @@ export class GalaxyVolume {
     const u = this.march.uniforms;
     u.uCount.value = near.length;
     near.forEach((n, i) => {
-      const [a, b, c, d] = galaxyParams(n.galaxy, 1);
+      const [a, b, c, d, e] = galaxyParams(n.galaxy, 1);
       u.uA.value[i].fromArray(a);
       u.uB.value[i].fromArray(b);
       u.uC.value[i].fromArray(c);
       u.uD.value[i].fromArray(d);
+      u.uE.value[i].fromArray(e);
       const ax = n.galaxy.axes;
       u.uFrame.value[i].set(ax[0], ax[1], ax[2], ax[3], ax[4], ax[5], ax[6], ax[7], ax[8]);
       u.uEye.value[i].set(n.eye.x, n.eye.y, n.eye.z);
