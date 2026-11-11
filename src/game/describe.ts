@@ -1,5 +1,6 @@
 import { EARTH_RADIUS_KM, KM_PER_AU, SUN_RADIUS_KM } from '../core/units';
-import { GM_EARTH, GM_SUN, type BodyData, type PlanetType, type Rgb } from '../universe/bodies';
+import { ECL_TO_APP } from '../universe/ephemeris';
+import { GM_EARTH, GM_SUN, orbitPosition, phaseName, simClock, type BodyData, type PlanetType, type Rgb } from '../universe/bodies';
 import { temperatureToRgb, type StarData } from '../universe/stars';
 import { generateSystem } from '../universe/system';
 import { MILKY_WAY, type GalaxyKind } from '../universe/universe';
@@ -103,11 +104,32 @@ export function properties(t: Target): [string, string][] {
     ['Atmosphere', atmosphere(b)],
     ['Semi-major axis', b.parent ? formatDistance(b.orbitRadius) : `${num(b.orbitRadius / KM_PER_AU)} AU`],
     ['Orbital period', formatDuration(b.orbitPeriod)],
-    ['Rotation period', Math.abs(b.rotationPeriod - b.orbitPeriod) < 1 ? 'Synchronous' : formatDuration(b.rotationPeriod)],
+    ...orbitRows(b, t.star.name),
+    ['Rotation period', Math.abs(Math.abs(b.rotationPeriod) - b.orbitPeriod) < 0.01 * b.orbitPeriod ? 'Synchronous'
+      : `${formatDuration(Math.abs(b.rotationPeriod))}${b.rotationPeriod < 0 ? ' (retrograde)' : ''}`],
     ['Axial tilt', `${num((b.axialTilt * 180) / Math.PI)}°`],
     ['Parent body', b.parent ? b.parent.name : t.star.name],
   ];
   if (!b.parent) rows.push(['Moons', `${b.moons.length}`]);
+  return rows;
+}
+
+const here = { x: 0, y: 0, z: 0 };
+
+/** The orbit's shape and plane, and where the body is on it now. */
+function orbitRows(b: BodyData, starName: string): [string, string][] {
+  const rows: [string, string][] = [];
+  const o = b.orbit;
+  if (o) {
+    rows.push(['Eccentricity', o.e.toFixed(4)]);
+    const plane = o.frame === ECL_TO_APP ? 'the ecliptic' : b.parent ? `${b.parent.name}'s equator` : 'the system plane';
+    rows.push(['Inclination', `${((Math.abs(o.i) * 180) / Math.PI).toFixed(2)}° to ${plane}`]);
+  }
+  orbitPosition(b, simClock.t, here);
+  const d = Math.hypot(here.x, here.y, here.z);
+  rows.push([`Distance from ${b.parent ? b.parent.name : starName === 'Sol' ? 'the Sun' : starName}`,
+    b.parent ? formatDistance(d) : `${num(d / KM_PER_AU)} AU`]);
+  if (b.parent) rows.push([`Phase from ${b.parent.name}`, phaseName(b, simClock.t)]);
   return rows;
 }
 

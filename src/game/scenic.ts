@@ -35,7 +35,10 @@ export interface BodyPose {
   pitch: number;
   /** Vertical field of view, degrees. Default 60. */
   fov?: number;
-  /** Sim time in seconds (bench 't'). Default 0. */
+  /**
+   * Seconds after SCENIC_EPOCH (bench 't'). Default 0. Sol's bodies move as they really do, so
+   * this picks the date: the season, the time of day under the spot, where the moons stand.
+   */
   t?: number;
 }
 
@@ -71,6 +74,9 @@ export interface ScenicSpot {
 
 const img = (id: string) => `/scenic/${id}.jpg`;
 
+/** The moment a pose's t counts from (and bench.html's): 2026-11-11 00:00 UTC. */
+export const SCENIC_EPOCH_MS = Date.UTC(2026, 10, 11);
+
 /** Two generated systems in Sol's neighbourhood that the seeds below visit (star id and where it lives). */
 const KOI_531579 = { star: 2472731579, starAt: [25989.217245323583, 0.7354063019156456, 861.1170824579895] as [number, number, number] };
 const HD_482855 = { star: 2028082855, starAt: [26017.812783379108, 27.24189686961472, 895.938798529096] as [number, number, number] };
@@ -92,7 +98,8 @@ export const SCENIC_SPOTS: ScenicSpot[] = [
     subtitle: 'Moon · Earth',
     description: 'Earth hanging over the grey lunar horizon.',
     image: img('moon-earthrise'),
-    pose: { kind: 'body', star: 'sol', planet: 2, moon: 0, alt: 1.5, sun: 1.3, az: 1.6, turn: -0.005, pitch: 0.07, fov: 20 },
+    // 2026-06-13 10:55 UTC, 40 h before new moon: a nearly full Earth 9 degrees up, opposite the low sun.
+    pose: { kind: 'body', star: 'sol', planet: 2, moon: 0, alt: 1.5, sun: 1.3, az: 3.434, turn: 0.0075, pitch: 0.07, fov: 20, t: -13007100 },
   },
   {
     id: 'saturn-rings',
@@ -101,7 +108,8 @@ export const SCENIC_SPOTS: ScenicSpot[] = [
     subtitle: 'Saturn · Sol',
     description: 'Three degrees over the ring plane, the rings sweeping across the sky.',
     image: img('saturn-rings'),
-    pose: { kind: 'body', star: 'sol', planet: 5, alt: 110000, sun: 0.9, az: 4.16, turn: 1.899, pitch: -1.45, fov: 70 },
+    // 3 degrees south of the ring plane, on the face the Sun lights in late 2026 (8 degrees south), rings level.
+    pose: { kind: 'body', star: 'sol', planet: 5, alt: 110000, sun: 0.9, az: 5.545, turn: 1.42, pitch: -1.45, fov: 70 },
   },
   {
     id: 'mars-sunset',
@@ -119,7 +127,8 @@ export const SCENIC_SPOTS: ScenicSpot[] = [
     subtitle: 'Io · Jupiter',
     description: 'The banded giant looming behind its volcanic moon.',
     image: img('jupiter-io'),
-    pose: { kind: 'body', star: 'sol', planet: 4, moon: 0, alt: 800, sun: 0.7, az: 6, turn: 1.612, pitch: -0.56, fov: 50 },
+    // 15 h after the epoch, Io stands where Jupiter shows ~90% lit; the spot puts it 23 degrees up.
+    pose: { kind: 'body', star: 'sol', planet: 4, moon: 0, alt: 800, sun: 0.7, az: 4.566, turn: 0.663, pitch: -0.56, fov: 50, t: 54000 },
   },
   {
     id: 'titan-haze',
@@ -137,7 +146,8 @@ export const SCENIC_SPOTS: ScenicSpot[] = [
     subtitle: 'KOI 531579 Ia · 44 ly from Sol',
     description: 'Standing on a cratered moon while a ringed gas giant fills the sky.',
     image: img('ringed-moonrise'),
-    pose: { kind: 'body', ...KOI_531579, planet: 0, moon: 0, alt: 1, sun: 1.2, az: 4.8, turn: -0.029, pitch: 0.3, fov: 70 },
+    // The moon orbits in the giant's equator, so its rings stand nearly edge-on in this sky.
+    pose: { kind: 'body', ...KOI_531579, planet: 0, moon: 0, alt: 1, sun: 1.2, az: 4.45, turn: 0.766, pitch: 0.3, fov: 70 },
   },
   {
     id: 'terra-dusk',

@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { KM_PER_LY, SUN_RADIUS_KM } from '../core/units';
-import { bodyPosition, type BodyData } from '../universe/bodies';
+import { bodyPosition, simTimeAt, type BodyData } from '../universe/bodies';
 import { SOL_POS } from '../universe/galaxy';
 import { makeStar, type StarData } from '../universe/stars';
 import { generateSystem } from '../universe/system';
-import type { BodyPose, SpacePose } from './scenic';
+import { SCENIC_EPOCH_MS, type BodyPose, type SpacePose } from './scenic';
 
 export interface ResolvedBodyPose {
   star: StarData;
@@ -39,7 +39,7 @@ export function resolveBodyPose(pose: BodyPose, sol: StarData): ResolvedBodyPose
   const planet = generateSystem(star).planets[pose.planet];
   const body = pose.moon === undefined ? planet : planet?.moons[pose.moon];
   if (!body) return null;
-  const simTime = pose.t ?? 0;
+  const simTime = simTimeAt(SCENIC_EPOCH_MS) + (pose.t ?? 0);
   bodyPosition(body, simTime, p);
   const pos = new THREE.Vector3(p.x, p.y, p.z);
 

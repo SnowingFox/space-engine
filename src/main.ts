@@ -15,7 +15,7 @@ import { Pipeline } from './render/pipeline';
 import { initProbe } from './render/probe';
 import { Starfield } from './render/starfield';
 import { SystemView, type BodyState } from './render/systemView';
-import type { SystemData } from './universe/bodies';
+import { EPOCH_MS, simClock, simTimeAt, type SystemData } from './universe/bodies';
 import { GALAXY_RADIUS, SOL_POS } from './universe/galaxy';
 import { makeSol, type StarData } from './universe/stars';
 import { generateSystem } from './universe/system';
@@ -70,7 +70,7 @@ let last = performance.now();
 let layout: LabelLayout = { items: [], marker: null };
 /** Debug: height above the terrain to snap to once the ground under the camera is known. */
 let hoverAlt: number | null = null;
-const epoch = Date.now();
+const epoch = EPOCH_MS;
 
 const hud = new Hud(document.getElementById('hud')!, document.getElementById('labels')!, {
   select: (t) => select(t),
@@ -452,6 +452,7 @@ function frame(now: number): void {
   const simDt = paused ? 0 : dt * timeRate;
   const prevSimTime = simTime;
   simTime += simDt;
+  simClock.t = simTime;
 
   let obstacles: Obstacle[] = [];
   if (view) {
@@ -661,5 +662,7 @@ Object.assign(window, {
       settling: hoverAlt !== null,
     }),
     time: timeCommand,
+    /** Debug: jump the clock to a moment (ISO string or Unix ms); the HUD shows that date. */
+    date: (when: string | number) => { simTime = simTimeAt(typeof when === 'number' ? when : Date.parse(when)); },
   },
 });

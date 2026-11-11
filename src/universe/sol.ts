@@ -1,6 +1,7 @@
 import { Rng } from '../core/rng';
-import { KM_PER_AU, SECONDS_PER_DAY } from '../core/units';
-import { GM_EARTH, GM_SUN, keplerPeriod, type BodyData, type PlanetType, type Rgb, type SystemData } from './bodies';
+import { SECONDS_PER_DAY } from '../core/units';
+import { EPOCH_TT, basisQuaternion, type BodyData, type PlanetType, type Rgb, type SystemData } from './bodies';
+import { iauRotation, orbitNormal, planetOrbit, poleFrame, raDecToApp, satelliteOrbit, type Orbit } from './ephemeris';
 import { makeBody } from './system';
 import type { StarData } from './stars';
 
@@ -52,11 +53,8 @@ export function makeSolSystem(star: StarData): SystemData {
     const p = makeBody(rng, 0x5010 + i, s.name, s.type, s.temp);
     apply(p, s);
     p.maps = s.name.toLowerCase();
-    p.orbitRadius = s.au * KM_PER_AU;
-    p.orbitPeriod = keplerPeriod(p.orbitRadius, GM_SUN);
-    p.inclination = rng.range(-0.03, 0.03);
-    p.axialTilt = (s.tilt * Math.PI) / 180;
-    p.rotationPeriod = s.day * SECONDS_PER_DAY;
+    rng.range(-0.03, 0.03); // (was a made-up inclination: still drawn so the moons keep their seeds)
+    setOrbit(p, planetOrbit(s.name)!);
     p.seaLevel = s.sea ?? 0;
     p.clouds = s.clouds ?? 0;
     if (s.rings !== undefined) p.rings = s.rings ? { ...s.rings, seed: 7.3 + i } : null;
@@ -67,18 +65,49 @@ export function makeSolSystem(star: StarData): SystemData {
       moon.rings = null;
       moon.clouds = ms.atmo ? 1 : 0;
       moon.seaLevel = 0;
-      moon.orbitRadius = ms.km;
-      moon.orbitPeriod = keplerPeriod(ms.km, GM_EARTH * s.mass);
-      moon.rotationPeriod = moon.orbitPeriod;
-      moon.inclination = rng.range(-0.08, 0.08);
+      rng.range(-0.08, 0.08);
+      setOrbit(moon, satelliteOrbit(ms.name)!);
       moon.parent = p;
       p.moons.push(moon);
     }
     return p;
   });
-  // A flattering starting geometry: Earth on the day side as seen from the spawn point.
-  planets[2].orbitPhase = 0.6;
+  for (const p of planets) {
+    setRotation(p);
+    for (const m of p.moons) setRotation(m);
+  }
   return { star, planets };
+}
+
+/** Elements to the body's fields: size, period, phase at the app's epoch, and the plane for the readouts. */
+function setOrbit(b: BodyData, o: Orbit): void {
+  b.orbit = o;
+  b.orbitRadius = o.a;
+  b.orbitPeriod = (2 * Math.PI) / o.n;
+  const m = o.m0 + o.n * EPOCH_TT;
+  b.orbitPhase = m - 2 * Math.PI * Math.floor(m / (2 * Math.PI));
+  b.inclination = o.i;
+  b.node = o.node;
+}
+
+const v = { x: 0, y: 0, z: 0 };
+
+/** IAU pole and prime meridian at the app's epoch. */
+function setRotation(b: BodyData): void {
+  const r = iauRotation(b.name, EPOCH_TT)!;
+  const f = poleFrame(r.ra, r.dec);
+  const node = { x: f[0], y: f[3], z: f[6] };
+  const pole = raDecToApp(r.ra, r.dec);
+  b.orientation = basisQuaternion(node, pole);
+  b.spinPhase = (((r.w % 360) + 360) % 360) * (Math.PI / 180);
+  b.rotationPeriod = (360 / r.rate) * SECONDS_PER_DAY;
+  // Obliquity: against the pole of the orbit as it stands at the epoch (the nodes of the Moon and
+  // Triton turn by degrees per decade). A body turning backwards about its IAU north pole spins
+  // about the opposite one (Venus: 177 degrees).
+  const o = b.orbit!;
+  const ref = orbitNormal({ ...o, i: o.i + o.iDot * EPOCH_TT, node: o.node + o.nodeDot * EPOCH_TT }, v);
+  const tilt = Math.acos(Math.max(-1, Math.min(1, pole.x * ref.x + pole.y * ref.y + pole.z * ref.z)));
+  b.axialTilt = r.rate < 0 ? Math.PI - tilt : tilt;
 }
 
 function apply(b: BodyData, s: { radius: number; mass: number; palette?: [Rgb, Rgb, Rgb, Rgb]; atmo?: { color: Rgb; density: number } | null }): void {

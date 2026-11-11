@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { BodyData, PlanetType } from '../universe/bodies';
+import { bodyOrientation, spinAngle, type BodyData, type PlanetType } from '../universe/bodies';
 import { ATMO_EXTINCT_FRAG, ATMO_FRAG, RING_FRAG, WORLD_VERT } from './atmosphereShader';
 import { Aurora, auroraStrength } from './aurora';
 import { BodyMaps, noMapUniforms } from './bodyMaps';
@@ -236,7 +236,7 @@ export class PlanetView {
       this.group.add(mesh);
     }
 
-    this.group.quaternion.setFromEuler(new THREE.Euler(body.axialTilt, body.node, 0, 'YXZ'));
+    this.group.quaternion.fromArray(bodyOrientation(body));
     this.axis.copy(AXIS).applyQuaternion(this.group.quaternion);
   }
 
@@ -264,7 +264,7 @@ export class PlanetView {
     if (!this.group.visible) return;
 
     this.group.position.copy(rel);
-    const angle = ((simTime / b.rotationPeriod) % 1) * Math.PI * 2;
+    const angle = spinAngle(b, simTime);
     this.spin.rotation.y = angle;
     if (this.sphere) this.sphere.geometry = b.radius / dist > 0.02 ? geoHi! : geoLo!;
 
@@ -314,7 +314,7 @@ export class PlanetView {
   /** Terrain height above the datum (km) under a world-space direction from the centre; null for gas or before the probe is ready. */
   heightAlong(dir: THREE.Vector3, simTime: number): number | null {
     if (!this.probeMat) return null;
-    const angle = ((simTime / this.body.rotationPeriod) % 1) * Math.PI * 2;
+    const angle = spinAngle(this.body, simTime);
     qInv.copy(this.group.quaternion).invert();
     const d = this.probeMat.uniforms.uProbeDir.value.copy(dir).normalize().applyQuaternion(qInv).applyAxisAngle(AXIS, -angle);
     this.probeMat.uniforms.uProbeFine.value.set(fineCoord(d.x), fineCoord(d.y), fineCoord(d.z));
