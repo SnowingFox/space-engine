@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Rng } from '../core/rng';
 import { GALAXIES, armStrengthOf, toGalaxy, type GalaxyData } from '../universe/universe';
-import { COSMOS } from '../universe/cosmos';
+import { COSMOS, D_STAR } from '../universe/cosmos';
 import { GALAXY_GLSL, galaxyKnotUniforms, galaxyNoise } from './galaxyShader';
 import { GalaxyHost } from './galaxyHost';
 import { GalaxyVolume, NEAR_GALAXIES, galaxyParams, type NearGalaxy } from './galaxyVolume';
@@ -12,6 +12,15 @@ import { SOFT_LAYER, softLayer } from './pipeline';
 // (inside, above or near them) on screen by GalaxyHost, with many frames averaged; every other one on a
 // billboard. (Inside the disc of a spiral the surveyed sky, HomeSky, may stand in for the model.)
 const NEAR_START = 6, NEAR_END = 8;
+/**
+ * How far the eye dark-adapts in intergalactic space, as a floor on the exposure (pipeline.darkAdapt; the
+ * light meter still caps the frame's mean at a dim night sky, so a galaxy that fills the view does not glare).
+ * Open space inside or near a galaxy adapts to DARK_ADAPTED (16); between the galaxies, with none within eight of
+ * its radii, to this: so far that a typical view shows hundreds of faint galaxies, small smudges and points,
+ * as SpaceEngine's does, and nearer ones as small spirals and ellipticals. (A deliberate choice: real dark-adapted
+ * eyes would see almost none of them; this is the view of a long exposure.)
+ */
+const INTERGALACTIC_ADAPT = 128;
 /** Billboard slots: the catalogue and every generated galaxy loaded around the camera. */
 const CAPACITY = 65536;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
@@ -48,6 +57,7 @@ attribute vec4 iC;
 attribute vec4 iD;
 attribute vec4 iE;
 attribute vec4 iGlow;   // rgb: light of the whole galaxy as one soft spot; a: its slot
+attribute float iLum;   // luminosity (the Milky Way's) of a generated galaxy, for its fade at the edge of what is generated
 uniform vec3 uCam;
 uniform float uPixelsPerRadian;
 uniform float uFullPpr;   // pixels per radian of the full-resolution view, whichever pass this is
@@ -82,6 +92,9 @@ void main() {
 #else
   weight *= 1.0 - big;
 #endif
+  // A generated galaxy comes into being where it is still too faint to show (cosmos.ts faintestAt): and fades in
+  // from there as the camera comes nearer, so that none appears all at once.
+  weight *= smoothstep(1.0, 3.0, iLum / (0.5 * pow(d / ${D_STAR.toExponential()}, 2.0)));
   // The surveyed sky has the Magellanic Clouds in it already.
   if (iGlow.a == 1.0 || iGlow.a == 2.0) weight *= 1.0 - uHideClouds;
   // Too small to show any structure: a soft spot carrying the same light, never smaller than a pixel.
@@ -114,7 +127,9 @@ void main() {
     world = transpose(mat3(modelViewMatrix)) * (v.xyz / v.w);
   }
   vRay = frame * world;
-  vMode = vec3(weight, spot, clamp(iA.x / d * uFullPpr * 0.1, 8.0, 24.0));
+  // (A small galaxy covers few pixels: it can afford more steps, and needs them, or its march is a speckle.)
+  float fullPx = iA.x / d * uFullPpr;
+  vMode = vec3(weight, spot, clamp(max(fullPx * 0.1, 2400.0 / max(fullPx, 1.0)), 8.0, 64.0));
   vQuad = position.xy;
   gl_Position = weight > 0.0 ? clip : vec4(2.0, 2.0, 2.0, 1.0);
 }
@@ -233,6 +248,15 @@ export class GalaxyCloud {
   private readonly eyes = new Map<number, { x: number; y: number; z: number }>();
   state = { mapped: 0, gain: 0, galaxies: 0 };
   /**
+   * How far the eye dark-adapts here (pipeline.darkAdapt): in intergalactic space, with no galaxy near, further
+   * than in open space anywhere else (INTERGALACTIC_ADAPT); 1 elsewhere.
+   */
+  adapt = 1;
+  /** (Tuning.) */
+  intergalactic = INTERGALACTIC_ADAPT;
+  private adaptSmooth = 1;
+  private lastAdaptT = 0;
+  /**
    * The billboards: one instance per galaxy, in slots. The catalogue's are fixed (slot = id); generated ones
    * (cosmos.ts) come and go as the camera moves, into free slots, and only the slots changed are uploaded.
    */
@@ -257,6 +281,7 @@ export class GalaxyCloud {
       const p = galaxyParams(g, 1);
       ['iA', 'iB', 'iC', 'iD', 'iE'].forEach((name, k) => a[name].array.set(p[k], slot * 4));
       a.iGlow.array.set([...glowOf(g), slot], slot * 4);
+      a.iLum.array[slot] = g.lum ?? 1e9;
     }
     this.dirty[0] = Math.min(this.dirty[0], slot);
     this.dirty[1] = Math.max(this.dirty[1], slot);
@@ -297,7 +322,7 @@ export class GalaxyCloud {
     const geometry = this.geometry;
     geometry.setAttribute('position', quad.getAttribute('position'));
     geometry.setIndex(quad.getIndex());
-    for (const [name, width] of [['iPos', 3], ['iX', 3], ['iY', 3], ['iZ', 3], ['iA', 4], ['iB', 4], ['iC', 4], ['iD', 4], ['iE', 4], ['iGlow', 4]] as const) {
+    for (const [name, width] of [['iPos', 3], ['iX', 3], ['iY', 3], ['iZ', 3], ['iA', 4], ['iB', 4], ['iC', 4], ['iD', 4], ['iE', 4], ['iGlow', 4], ['iLum', 1]] as const) {
       const attr = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY * width), width);
       attr.setUsage(THREE.DynamicDrawUsage);
       this.attrs[name] = attr;
@@ -472,6 +497,13 @@ export class GalaxyCloud {
     near.length = Math.min(near.length, NEAR_GALAXIES);
     // The eye adapts: inside a disc its light is all around and reads dimmer than the same galaxy seen whole from outside.
     const host = near[0];
+    // Between the galaxies, far from all of them, the eye adapts further still (over a few seconds, as eyes do).
+    const apart = THREE.MathUtils.smoothstep(host ? span(host) : NEAR_END, 4, NEAR_END);
+    const tNow = performance.now() / 1000, dtA = Math.min(Math.max(tNow - this.lastAdaptT, 0), 0.25);
+    this.lastAdaptT = tNow;
+    const goal = THREE.MathUtils.lerp(1, this.intergalactic, apart);
+    this.adaptSmooth += (goal - this.adaptSmooth) * (1 - Math.exp(-dtA / 2));
+    this.adapt = this.adaptSmooth;
     let out = 1;
     if (host) {
       const g = host.galaxy;

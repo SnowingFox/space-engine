@@ -51,6 +51,8 @@ export interface GalaxyData {
   lopsided?: number;
   /** How much its disc is drawn out along the bar (1: round). */
   elongation?: number;
+  /** Luminosity, in the Milky Way's (generated galaxies, cosmos.ts). */
+  lum?: number;
 }
 
 /** Fractional part of a hash of a galaxy's seed: a value of its own that draws nothing from the generator. */
@@ -193,15 +195,23 @@ function build(): GalaxyData[] {
   randomAxes(rng);
   add('Large Magellanic Cloud', 'irregular', fromSky(280.5, -32.9, 163e3), 15000, facing(280.5, -32.9, 35, 0.9), {
     // (30 Doradus, the largest; N11 and N44 smaller. The bar sits some 1.5 kly off the disc's centre.)
-    // (Brightness: matched to the survey's LMC as seen from Sol, scripts/textures/pano_spot.py.)
-    // A barred Magellanic spiral: the bar a chain of star clouds off the disc's centre, one ragged arm wound
-    // from its end, the disc patchy and lopsided.
-    // (The light shared out between them so that the whole is as bright as before, matched to the survey.)
-    arms: 1, pitchK: 1.6, armContrast: 0.75, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.1 / 750, discLum: 0.62e-4,
+    // A barred Magellanic spiral, as the wide-field photographs show it: a bright bar of star clouds off the
+    // disc's centre, one arm wound out from its end (to the north-east, 30 Doradus on it), a faint patchy disc.
+    // (Two arms, one of them all but gone: a single arm of the width real ones have.)
+    arms: 2, pitchK: 1.0, armContrast: 1, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.22 / 750, discLum: 0.6e-4,
     discScale: 4500, height: 650, irregular: 0.62, blue: 0.95, dust: 0.5, barShift: [-800, 1200], tint: [0.84, 0.82, 1.0],
-    flocculent: 0.75, spurs: 0, lopsided: 0.9,
+    flocculent: 0.25, spurs: 0, lopsided: 1,
     knots: [[3200, 2400, 1800, 3.2], [-5200, -2600, 900, 1.5], [1200, -3600, 700, 1.2]],
   });
+  // (Its light as a whole is the one matched to the survey's LMC from Sol, scripts/textures/pano_spot.py, with
+  // the disc and bar of then: only its share between them has changed.)
+  {
+    const lmc = list[list.length - 1];
+    // (And 0.88: with more of it in the bar, less is lost in its dust, and from Sol it came out 15 % brighter.)
+    const k = 0.88 * lightOf({ ...lmc, discLum: 0.6e-4, bulgeLum: 0.16 / 750 }) / lightOf(lmc);
+    lmc.discLum *= k;
+    lmc.bulgeLum *= k;
+  }
   add('Small Magellanic Cloud', 'irregular', fromSky(302.8, -44.3, 200e3), 9000, undefined, {
     // (NGC 346, its brightest star-forming region, and the Wing of young stars reaching towards the LMC.)
     // Lumpy and drawn out along its bar, the Wing of young stars off one end.
@@ -221,7 +231,7 @@ function build(): GalaxyData[] {
   add('Cigar Galaxy (M82)', 'irregular', fromSky(141.4, 40.6, 11.5e6), 18500);
   add('Centaurus A', 'lenticular', fromSky(309.5, 19.4, 12.4e6), 48000, undefined, { dust: 2.2 });
   add('Southern Pinwheel (M83)', 'barred spiral', fromSky(314.6, 32, 15e6), 27500, undefined, { arms: 2, armContrast: 1, blue: 1 });
-  add('Pinwheel (M101)', 'spiral', fromSky(102, 59.8, 21e6), 85000, undefined, { arms: 4, armContrast: 0.9, blue: 1, flocculent: 0.55, spurs: 0.6, lopsided: 0.7 });
+  add('Pinwheel (M101)', 'spiral', fromSky(102, 59.8, 21e6), 85000, undefined, { arms: 4, armContrast: 0.9, blue: 1, flocculent: 0.55, spurs: 0.6, lopsided: 0.7, pitchK: 1 / Math.tan(28 * DEG) });
   add('Whirlpool (M51)', 'spiral', fromSky(104.9, 68.6, 28e6), 38000, undefined, { arms: 2, armContrast: 1, blue: 0.9, flocculent: 0.2, spurs: 0.8, lopsided: 0.35 });
   add('Sombrero (M104)', 'lenticular', fromSky(298.5, 51.1, 31e6), 25000, undefined, { dust: 1.8 });
   add('Phantom (M74)', 'spiral', fromSky(138.6, -45.7, 30e6), 47500, undefined, { arms: 2, armContrast: 1 });
@@ -327,11 +337,14 @@ export function armStrengthOf(g: GalaxyData, x: number, z: number, warped?: numb
   const r = Math.hypot(x, qz);
   if (r < 1) return 1;
   let theta = warped ?? Math.atan2(qz, x);
-  if (st.flocculent > 0) theta += st.flocculent * 0.7 * (gnoise(x / (g.radius * 0.16) + g.seed + 23, g.seed + 23, z / (g.radius * 0.16) + g.seed + 23) - 0.5);
+  if (st.flocculent > 0) {
+    const sc = 0.5 * r + g.radius * 0.03;
+    theta += st.flocculent * 1.4 * (gnoise(x / sc + g.seed + 23, g.seed + 23, z / sc + g.seed + 23) - 0.5);
+  }
   const logr = Math.log(r / (g.radius * 0.077));
   const phase = g.arms * (theta - g.pitchK * logr);
   const major = Math.pow(0.5 + 0.5 * Math.cos(phase), 3);
-  const minor = Math.pow(0.5 + 0.5 * Math.cos(2 * phase + 1.3), 4) * 0.35;
+  const minor = Math.pow(0.5 + 0.5 * Math.cos(2 * phase + 1.3), 4) * 0.35 * (1 - 0.8 * st.flocculent);
   const core = Math.min(1, Math.max(0, (r - g.radius * 0.048) / (g.radius * 0.096)));
   let a = (1 - core) + core * (0.45 + (Math.min(1, major + minor) - 0.45) * g.armContrast);
   if (st.spurs > 0) {

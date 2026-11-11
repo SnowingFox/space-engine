@@ -22,6 +22,8 @@ const scenarios = [
   // The user's case: 17 kly from the centre in the plane, a big near dark cloud in view, 6.48 kly/s, strafing and forward.
   ['k17-strafe', `${K} window.__v=[-L[2]*6480/Math.hypot(L[0],L[2]),0,L[0]*6480/Math.hypot(L[0],L[2])]`, '...__v'],
   ['k17-strafe1k', `${K} window.__v=[-L[2]*1000/Math.hypot(L[0],L[2]),0,L[0]*1000/Math.hypot(L[0],L[2])]`, '...__v'],
+  // Between the galaxies, 30 Mly out, flying through them at 3 Mly/s.
+  ['intergalactic', 'at(2e6,3e7,1e6); look(0.3,-1,0.2)', '0.86e6,-2.86e6,0.57e6'],
   ['k17-fwd', `${K} window.__v=L.map((v)=>v*6480/Math.hypot(...L))`, '...__v'],
 ].filter(([n]) => !only || only.split(',').includes(n));
 

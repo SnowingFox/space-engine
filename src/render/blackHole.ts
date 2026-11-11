@@ -3,7 +3,7 @@ import { C_KM_S, KM_PER_LY } from '../core/units';
 import type { LabelSource } from '../game/labels';
 import type { Obstacle, Player } from '../game/player';
 import { blackHoleTarget, targetPosition, type Target } from '../game/target';
-import { BLACK_HOLES, blackHoleOffset, type BlackHoleData } from '../universe/blackHoles';
+import { BLACK_HOLES, blackHoleOffset, syncGeneratedHoles, type BlackHoleData } from '../universe/blackHoles';
 import { SHADOW_BINS, iscoRadius, shadowTable } from '../universe/kerr';
 import { temperatureToRgb } from '../universe/stars';
 import type { LensParams, LensPass } from './lensPass';
@@ -76,7 +76,9 @@ const off1 = { x: 0, y: 0, z: 0 };
 
 export class BlackHoles {
   /** Those with light of their own, drawn as points while too small to trace. */
-  private readonly lit = BLACK_HOLES.filter((b) => b.lum > 0 && !b.companion);
+  private lit: BlackHoleData[] = [];
+  /** (The list of holes as last seen: generated galaxies' come and go, syncGeneratedHoles.) */
+  private listVersion = -1;
   private readonly points: THREE.Points;
   private readonly pointMat: THREE.ShaderMaterial;
   private readonly params: LensParams[] = Array.from({ length: MAX_HOLES }, () => ({
@@ -88,8 +90,16 @@ export class BlackHoles {
   /** The shadow table each slot holds, by hole and inclination, so it is rebuilt only when the view changes. */
   private readonly shadowKey: string[] = [];
   /** Per hole this frame: camera distance (r_s) and how much of its point gives way to the traced disc. */
-  private readonly ro = new Float64Array(BLACK_HOLES.length);
-  private readonly pos = BLACK_HOLES.map(() => new THREE.Vector3());
+  private readonly roOf = new Map<number, number>();
+  private readonly posOf = new Map<number, THREE.Vector3>();
+  private pos(bh: BlackHoleData): THREE.Vector3 {
+    let v = this.posOf.get(bh.id);
+    if (!v) this.posOf.set(bh.id, (v = new THREE.Vector3()));
+    return v;
+  }
+  private ro(bh: BlackHoleData): number {
+    return this.roOf.get(bh.id) ?? Infinity;
+  }
   private readonly inPass = new Set<number>();
   /** The lowest exposure the eye may adapt to now (pipeline.minExposure). */
   minExposure = 0.6;
@@ -97,6 +107,19 @@ export class BlackHoles {
   near: NearHole | null = null;
 
   constructor(bgScene: THREE.Scene, private readonly lens: LensPass, pixelRatio: number) {
+    this.pointMat = new THREE.ShaderMaterial({
+      vertexShader: POINT_VERT, fragmentShader: POINT_FRAG, uniforms: { uPixelRatio: { value: pixelRatio } },
+      blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, transparent: true,
+    });
+    this.points = new THREE.Points(new THREE.BufferGeometry(), this.pointMat);
+    this.points.frustumCulled = false;
+    this.relist();
+    bgScene.add(this.points);
+  }
+
+  /** The holes with light of their own, as points: again whenever the list of holes changes. */
+  private relist(): void {
+    this.lit = BLACK_HOLES.filter((b) => b.lum > 0 && !b.companion);
     const n = this.lit.length;
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
@@ -109,13 +132,11 @@ export class BlackHoles {
     });
     g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
     g.setAttribute('aLum', new THREE.BufferAttribute(new Float32Array(this.lit.map((b) => b.lum)), 1));
-    this.pointMat = new THREE.ShaderMaterial({
-      vertexShader: POINT_VERT, fragmentShader: POINT_FRAG, uniforms: { uPixelRatio: { value: pixelRatio } },
-      blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, transparent: true,
-    });
-    this.points = new THREE.Points(g, this.pointMat);
-    this.points.frustumCulled = false;
-    bgScene.add(this.points);
+    this.points.geometry.dispose();
+    this.points.geometry = g;
+    // (Those no longer listed are forgotten.)
+    const ids = new Set(BLACK_HOLES.map((b) => b.id));
+    for (const id of this.posOf.keys()) if (!ids.has(id)) { this.posOf.delete(id); this.roOf.delete(id); }
   }
 
   /** km from the anchor star to a hole now. */
@@ -161,6 +182,9 @@ export class BlackHoles {
   update(player: Player, simTime: number, simDt: number, fov: number, aspect: number, ppr: number, pixelRatio: number,
     occluder: { pos: THREE.Vector3; radius: number } | null, width: number, height: number): void {
     const gx = player.anchor.x + player.local.x / KM_PER_LY, gy = player.anchor.y + player.local.y / KM_PER_LY, gz = player.anchor.z + player.local.z / KM_PER_LY;
+    // The holes of the generated galaxies around.
+    const version = syncGeneratedHoles(gx, gy, gz);
+    if (version !== this.listVersion) { this.listVersion = version; this.relist(); }
     const tanY = Math.tan(THREE.MathUtils.degToRad(fov) / 2);
     const halfDiag = Math.atan(tanY * Math.hypot(1, aspect));
     const view = v2.set(0, 0, -1).applyQuaternion(player.quat);
@@ -170,13 +194,13 @@ export class BlackHoles {
       const dLy = Math.hypot(bh.x - gx, bh.y - gy, bh.z - gz);
       // Rough distance in radii; exact (km, relative to the anchor) only for the few close enough to matter.
       let ro = (dLy * KM_PER_LY) / bh.rs;
-      this.ro[bh.id] = ro;
+      this.roOf.set(bh.id, ro);
       const span = Math.max(bh.disc ? bh.disc.rOut : 0, bh.jet ? bh.jet.length : 0);
       if (ro > 8 * ppr * ppr && ro > span * ppr) continue;
-      const rel = this.position(bh, player, simTime, this.pos[bh.id]).sub(player.local);
+      const rel = this.position(bh, player, simTime, this.pos(bh)).sub(player.local);
       const dist = rel.length();
       ro = dist / bh.rs;
-      this.ro[bh.id] = ro;
+      this.roOf.set(bh.id, ro);
       if (!this.near || ro < this.near.ro) this.near = { bh, dist, ro };
       const einstein = Math.sqrt(2 / ro) * ppr;
       const discPx = bh.disc ? (bh.disc.rOut / ro) * ppr : 0;
@@ -204,7 +228,7 @@ export class BlackHoles {
       const slot = holes.length;
       const p = this.params[slot];
       const bh = c.bh;
-      const rel = this.pos[bh.id];
+      const rel = this.pos(bh);
       p.cam.copy(rel).negate().divideScalar(bh.rs);
       p.axis.set(bh.axis[0], bh.axis[1], bh.axis[2]);
       p.reachCos = c.reach >= Math.PI ? -2 : Math.cos(c.reach);
@@ -288,7 +312,7 @@ export class BlackHoles {
     const arr = pa.array as Float32Array;
     const lum = la.array as Float32Array;
     this.lit.forEach((b, i) => {
-      const ro = this.ro[b.id];
+      const ro = this.ro(b);
       const discPx = b.disc ? (b.disc.light.rHalf / ro) * ppr : 0;
       const dx = b.x - gx, dy = b.y - gy, dz = b.z - gz;
       const cosI = Math.max(Math.abs(dx * b.axis[0] + dy * b.axis[1] + dz * b.axis[2]) / Math.max(Math.hypot(dx, dy, dz), 1e-30), 0.05);
@@ -333,9 +357,9 @@ export class BlackHoles {
   labels(): LabelSource[] {
     const out: LabelSource[] = [];
     for (const bh of BLACK_HOLES) {
-      const ro = this.ro[bh.id];
+      const ro = this.ro(bh);
       if (ro > 2e6) continue;
-      out.push({ target: blackHoleTarget(bh), rel: this.pos[bh.id].clone(), radius: bh.rs, fade: 1 - THREE.MathUtils.smoothstep(ro, 2e5, 2e6) });
+      out.push({ target: blackHoleTarget(bh), rel: this.pos(bh).clone(), radius: bh.rs, fade: 1 - THREE.MathUtils.smoothstep(ro, 2e5, 2e6) });
     }
     return out;
   }
@@ -345,10 +369,10 @@ export class BlackHoles {
     let best: BlackHoleData | null = null;
     let bestAng = Infinity;
     for (const bh of BLACK_HOLES) {
-      const ro = this.ro[bh.id];
+      const ro = this.ro(bh);
       const close = ro < 2e6;
       if (!close && !(bh.lum > 0 && !bh.companion)) continue;
-      const d = close ? this.pos[bh.id] : v1.set(bh.x - gal.x, bh.y - gal.y, bh.z - gal.z);
+      const d = close ? this.pos(bh) : v1.set(bh.x - gal.x, bh.y - gal.y, bh.z - gal.z);
       const ang = d.angleTo(dir);
       const reach = Math.max(0.01, close && bh.disc ? Math.min(bh.disc.rOut / ro, 0.3) : 0, close ? 12 / ro : 0);
       if (ang < reach && ang < bestAng && (close || this.pointVisible(bh, d.length()))) { bestAng = ang; best = bh; }

@@ -4,6 +4,7 @@ import { discEfficiency, iscoRadius } from './kerr';
 import type { StarData } from './stars';
 // (Positions on Sol's sky go through universe.ts's fromSky, the one galactic-coordinate convention.)
 import { GALAXIES, NAMED_GALAXIES, SOL, fromSky, type GalaxyData } from './universe';
+import { COSMOS } from './cosmos';
 
 // Black holes: Sagittarius A* at the centre of the Milky Way (the universe origin), a central one in
 // most other galaxies (catalogued masses for the named ones, generated from size for the rest), and
@@ -257,58 +258,145 @@ function build(): void {
   });
 
   // Central black holes of the other galaxies.
-  const NAMED: Record<string, [string, number, number?]> = {
-    'Andromeda (M31)': ['M31*', 1.4e8, 1e-6], 'M32': ['M32*', 2.5e6], "Bode's Galaxy (M81)": ['M81*', 7e7, 1e-5],
-    'Cigar Galaxy (M82)': ['M82*', 3e7], 'Sculptor (NGC 253)': ['NGC 253*', 1e7], 'Centaurus A': ['Centaurus A*', 5.5e7, 1e-4],
-    'Southern Pinwheel (M83)': ['M83*', 1e7], 'Pinwheel (M101)': ['M101*', 2.5e6], 'Whirlpool (M51)': ['M51*', 1e6, 1e-4],
-    'Sombrero (M104)': ['M104*', 1e9, 1e-6], 'Virgo A (M87)': ['M87*', 6.5e9, 3e-4], 'NGC 1300': ['NGC 1300*', 7.3e7],
-  };
+
   for (const g of GALAXIES) {
     if (g.id === 0) continue;
-    const rng = new Rng(9100 + g.id);
     const named = g.id < NAMED_GALAXIES ? NAMED[g.name] : undefined;
     if (g.id < NAMED_GALAXIES && !named) continue;
-    if (!named && g.kind === 'irregular') continue;
-    const normal: [number, number, number] = [g.axes[3], g.axes[4], g.axes[5]];
-    let axis = norm(normal.map((v) => v + rng.gauss() * 0.3));
-    let mass: number, mdot: number;
-    if (named) {
-      mass = named[1];
-      mdot = named[2] ?? 1e-7;
-    } else {
-      const base = g.kind === 'elliptical' ? 1.5e8 : g.kind === 'lenticular' ? 6e7 : 2e7;
-      mass = base * Math.pow(g.radius / 50000, 2.5) * Math.pow(10, rng.gauss() * 0.35);
-      // Most nuclei are starved; a few shine as quasars.
-      mdot = rng.chance(0.03) ? rng.range(0.05, 0.4) : Math.pow(10, rng.range(-8.5, -3.5));
-    }
-    let jet: JetData | null = null;
-    let state = mdot > 0.01 ? 'Quasar: luminous thin disc' : mdot > 1e-5 ? 'Low-luminosity active nucleus' : 'Starved: hot, faint flow';
-    if (g.name === 'Virgo A (M87)') {
-      // M87*: 6.5e9 M☉ (EHT 2019), jet ~17 deg from our line of sight, bulk Lorentz factor ~ 3-6 (HST-1 superluminal).
-      axis = axisSeenFromSol(g.x, g.y, g.z, 17, 108);
-      // Knots along the deprojected ~5 kpc jet: HST-1, D, E, F, I, A, B, C.
-      const kpc = 3.086e16 / RS_PER_MSUN / mass;
-      jet = {
-        length: 5 * kpc, gamma: 3.2, power: 1.1,
-        knots: [[0.046, 2.5], [0.19, 1.2], [0.32, 0.8], [0.48, 1.0], [0.6, 0.9], [0.68, 2.6], [0.76, 1.8], [0.94, 0.9]],
-      };
-      state = 'Low-luminosity active nucleus with a relativistic jet';
-    } else if (g.name === 'Centaurus A') {
-      axis = axisSeenFromSol(g.x, g.y, g.z, 55, 55);
-      const kpc = 3.086e16 / RS_PER_MSUN / mass;
-      jet = { length: 4 * kpc, gamma: 1.6, power: 0.5, knots: [[0.1, 1.5], [0.3, 1.2], [0.55, 0.8]] };
-      state = 'Active nucleus with a relativistic jet';
-    }
-    const quasar = mdot > 0.01;
-    // M87*: ~0.9 from its jet power and the EHT ring (EHT 2019 V); the others unmeasured, generated ones drawn at random.
-    const spin = g.name === 'Virgo A (M87)' ? 0.9 : named ? null : Math.round(rng.range(0.2, 0.98) * 100) / 100;
-    add({
-      name: named ? named[0] : `${g.name}*`, kind: 'supermassive', mass, spin,
-      x: g.x, y: g.y, z: g.z, axis, disc: makeDisc(mass, spin, mdot, null, quasar ? 600 : 80), jet, state, companion: null, orbit: null, galaxy: g,
-    });
+    const spec = centralSpec(g, named);
+    if (spec) add(spec);
   }
 }
+
+/** The catalogue's central black holes with measured masses (name, solar masses, accretion rate in Eddington units). */
+const NAMED: Record<string, [string, number, number?]> = {
+  'Andromeda (M31)': ['M31*', 1.4e8, 1e-6], 'M32': ['M32*', 2.5e6], "Bode's Galaxy (M81)": ['M81*', 7e7, 1e-5],
+  'Cigar Galaxy (M82)': ['M82*', 3e7], 'Sculptor (NGC 253)': ['NGC 253*', 1e7], 'Centaurus A': ['Centaurus A*', 5.5e7, 1e-4],
+  'Southern Pinwheel (M83)': ['M83*', 1e7], 'Pinwheel (M101)': ['M101*', 2.5e6], 'Whirlpool (M51)': ['M51*', 1e6, 1e-4],
+  'Sombrero (M104)': ['M104*', 1e9, 1e-6], 'Virgo A (M87)': ['M87*', 6.5e9, 3e-4], 'NGC 1300': ['NGC 1300*', 7.3e7],
+};
+
+/** Mass and accretion rate of a galaxy's central hole: catalogued, or drawn from its size (most starved, a few quasars). */
+function centralRates(g: GalaxyData, named: [string, number, number?] | undefined): { rng: Rng; axis: [number, number, number]; mass: number; mdot: number } {
+  const rng = new Rng(9100 + g.id);
+  const normal: [number, number, number] = [g.axes[3], g.axes[4], g.axes[5]];
+  const axis = norm(normal.map((v) => v + rng.gauss() * 0.3));
+  if (named) return { rng, axis, mass: named[1], mdot: named[2] ?? 1e-7 };
+  const base = g.kind === 'elliptical' ? 1.5e8 : g.kind === 'lenticular' ? 6e7 : 2e7;
+  const mass = base * Math.pow(g.radius / 50000, 2.5) * Math.pow(10, rng.gauss() * 0.35);
+  // Most nuclei are starved; a few shine as quasars.
+  const mdot = rng.chance(0.03) ? rng.range(0.05, 0.4) : Math.pow(10, rng.range(-8.5, -3.5));
+  return { rng, axis, mass, mdot };
+}
+
+/** A galaxy's central black hole, before it is added (null: an irregular, with none). */
+function centralSpec(g: GalaxyData, named: [string, number, number?] | undefined): Omit<BlackHoleData, 'id' | 'rs' | 'lum'> | null {
+  if (!named && g.kind === 'irregular') return null;
+  const r = centralRates(g, named);
+  const { rng, mass, mdot } = r;
+  let axis = r.axis;
+  let jet: JetData | null = null;
+  let state = mdot > 0.01 ? 'Quasar: luminous thin disc' : mdot > 1e-5 ? 'Low-luminosity active nucleus' : 'Starved: hot, faint flow';
+  if (g.name === 'Virgo A (M87)') {
+    // M87*: 6.5e9 M☉ (EHT 2019), jet ~17 deg from our line of sight, bulk Lorentz factor ~ 3-6 (HST-1 superluminal).
+    axis = axisSeenFromSol(g.x, g.y, g.z, 17, 108);
+    // Knots along the deprojected ~5 kpc jet: HST-1, D, E, F, I, A, B, C.
+    const kpc = 3.086e16 / RS_PER_MSUN / mass;
+    jet = {
+      length: 5 * kpc, gamma: 3.2, power: 1.1,
+      knots: [[0.046, 2.5], [0.19, 1.2], [0.32, 0.8], [0.48, 1.0], [0.6, 0.9], [0.68, 2.6], [0.76, 1.8], [0.94, 0.9]],
+    };
+    state = 'Low-luminosity active nucleus with a relativistic jet';
+  } else if (g.name === 'Centaurus A') {
+    axis = axisSeenFromSol(g.x, g.y, g.z, 55, 55);
+    const kpc = 3.086e16 / RS_PER_MSUN / mass;
+    jet = { length: 4 * kpc, gamma: 1.6, power: 0.5, knots: [[0.1, 1.5], [0.3, 1.2], [0.55, 0.8]] };
+    state = 'Active nucleus with a relativistic jet';
+  }
+  const quasar = mdot > 0.01;
+  // M87*: ~0.9 from its jet power and the EHT ring (EHT 2019 V); the others unmeasured, generated ones drawn at random.
+  const spin = g.name === 'Virgo A (M87)' ? 0.9 : named ? null : Math.round(rng.range(0.2, 0.98) * 100) / 100;
+  return {
+    name: named ? named[0] : `${g.name}*`, kind: 'supermassive', mass, spin,
+    x: g.x, y: g.y, z: g.z, axis, disc: makeDisc(mass, spin, mdot, null, quasar ? 600 : 80), jet, state, companion: null, orbit: null, galaxy: g,
+  };
+}
 build();
+/** The catalogue's holes come first in BLACK_HOLES; after them, those of generated galaxies now around (see syncGeneratedHoles). */
+const CATALOGUED_HOLES = BLACK_HOLES.length;
+
+// The central holes of generated galaxies (cosmos.ts) are made when first needed, from the galaxy's id as the
+// catalogue's are from theirs, and listed while their galaxy is near the camera (a hole is only found close up)
+// or, for the few quasars, while it is loaded at all: those shine from far off, as points of light.
+const HOLE_ID_BASE = 1e6;
+const madeHoles = new Map<number, BlackHoleData | null>();
+/** How far around the camera the holes of generated galaxies are listed, ly. */
+const HOLE_REACH = 3e6;
+/** Holes made per frame at most (a disc's light takes a fraction of a millisecond to work out). */
+const HOLES_PER_FRAME = 6;
+
+/** Whether a generated galaxy's hole is a quasar, without making it. */
+function isQuasar(g: GalaxyData): boolean {
+  return g.kind !== 'irregular' && centralRates(g, undefined).mdot > 0.01;
+}
+
+function holeOfGenerated(g: GalaxyData): BlackHoleData | null {
+  if (madeHoles.has(g.id)) return madeHoles.get(g.id)!;
+  const spec = centralSpec(g, undefined);
+  let bh: BlackHoleData | null = null;
+  if (spec) {
+    bh = { ...spec, id: HOLE_ID_BASE + g.id, rs: RS_PER_MSUN * spec.mass, lum: 0 };
+    bh.lum = discLuminosity(bh);
+  }
+  if (madeHoles.size > 50000) madeHoles.clear();
+  madeHoles.set(g.id, bh);
+  return bh;
+}
+
+/** The hole of a generated galaxy (made now if need be); null for an irregular. */
+export function centralBlackHoleOf(g: GalaxyData): BlackHoleData | null {
+  return g.id < NAMED_GALAXIES ? centralBlackHole(g) : holeOfGenerated(g);
+}
+
+let holesVersion = 0;
+let quasarHosts: GalaxyData[] = [];
+let scannedCosmos = -1;
+/**
+ * Brings the generated galaxies' holes in BLACK_HOLES up to date for a camera at (x, y, z) (universe, ly):
+ * those of galaxies within HOLE_REACH and every quasar of a loaded galaxy, a few made per frame. Returns a
+ * number that changes whenever the list does.
+ */
+export function syncGeneratedHoles(x: number, y: number, z: number): number {
+  if (COSMOS.version !== scannedCosmos) {
+    scannedCosmos = COSMOS.version;
+    quasarHosts = [];
+    COSMOS.forEach((g) => { if (isQuasar(g)) quasarHosts.push(g); });
+  }
+  let budget = HOLES_PER_FRAME;
+  const want: BlackHoleData[] = [];
+  const take = (g: GalaxyData): void => {
+    if (!madeHoles.has(g.id)) {
+      if (budget <= 0) return;
+      budget--;
+    }
+    const bh = holeOfGenerated(g);
+    if (bh) want.push(bh);
+  };
+  COSMOS.near(x, y, z, HOLE_REACH, (g) => { if (g.kind !== 'irregular') take(g); });
+  for (const g of quasarHosts) take(g);
+  // (Unchanged: nothing to do.)
+  const now = BLACK_HOLES.length - CATALOGUED_HOLES;
+  const seen = new Set<BlackHoleData>();
+  const list = want.filter((b) => (seen.has(b) ? false : (seen.add(b), true)));
+  let same = list.length === now;
+  for (let i = 0; same && i < list.length; i++) same = BLACK_HOLES[CATALOGUED_HOLES + i] === list[i];
+  if (!same) {
+    BLACK_HOLES.length = CATALOGUED_HOLES;
+    BLACK_HOLES.push(...list);
+    holesVersion++;
+  }
+  return holesVersion;
+}
 
 /** The hole's offset from its catalogue position (its companion) at a simulation time, km. */
 export function blackHoleOffset(bh: BlackHoleData, simTime: number, out: { x: number; y: number; z: number }): void {

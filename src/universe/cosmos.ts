@@ -26,7 +26,7 @@ const ALPHA = -1.25;
 /** The faintest galaxies drawn (dwarfs, a few times fainter than the SMC). */
 const X_FLOOR = 0.002;
 /** A galaxy as bright as the Milky Way stays in view out to this far (its glow then fades below a pixel's grey level). */
-const D_STAR = 150e6;
+export const D_STAR = 150e6;
 /** Cells drawn around the camera, in each direction: out to where only the brightest galaxies would still show. */
 const REACH = 10;
 
@@ -264,6 +264,7 @@ function makeGalaxy(code: number, st: Structure, rank: number, x: number): Galax
   g.discLum *= scale;
   g.bulgeLum *= scale;
   g.name = `PGC ${g.id}`;
+  g.lum = x;
   // (Seeds above the catalogue's: the giant star-forming regions and off-centre bars the march gives a seed are its alone.)
   g.seed += 100;
   return g;
@@ -313,6 +314,9 @@ export class Cosmos {
     this.offsets.sort((a, b) => a[0] ** 2 + a[1] ** 2 + a[2] ** 2 - (b[0] ** 2 + b[1] ** 2 + b[2] ** 2));
   }
 
+  /** Changes whenever galaxies come or go. */
+  version = 0;
+
   /** Galaxies generated so far. */
   get count(): number {
     return this.byId.size;
@@ -348,6 +352,7 @@ export class Cosmos {
     }
     if (level < 0) this.loaded.delete(code);
     else this.loaded.set(code, { level, galaxies: next });
+    this.version++;
   }
 
   /** Brings the cells around the camera to the detail their distance calls for, within a time budget (ms). */

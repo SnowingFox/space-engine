@@ -558,7 +558,8 @@ function frame(now: number): void {
   // up as far as this when nothing bright is in view, and down at once for a sun or a lit world.
   pipeline.maxExposure = DARK_ADAPTED;
   // Inside or next to a nebula the eye adapts to its faint light.
-  pipeline.darkAdapt = nebulae.adapt;
+  // (And between the galaxies to their faint light, galaxyCloud.ts.)
+  pipeline.darkAdapt = Math.max(nebulae.adapt, cloud.adapt);
   const low = nearBody as BodyState | null;
 
   player.galactic(gal);

@@ -122,19 +122,20 @@ float gBulge(vec3 p, vec4 gA, vec4 gD, vec2 turn) {
 }
 
 // 0..1: how strongly a point of the disc belongs to a spiral arm (matches armStrengthOf on the CPU).
-float gArm(float theta, float r, vec4 gA, vec4 gB) {
+// (minorW: how much of the secondary arms between the main ones; a flocculent spiral has fewer, as rings of them read.)
+float gArm(float theta, float r, vec4 gA, vec4 gB, float minorW) {
   float phase = gB.x * (theta - gB.y * log(max(r, 1.0) / (gA.x * 0.077)));
   float major = pow(0.5 + 0.5 * cos(phase), 3.0);
-  float minor = pow(0.5 + 0.5 * cos(2.0 * phase + 1.3), 4.0) * 0.35;
+  float minor = pow(0.5 + 0.5 * cos(2.0 * phase + 1.3), 4.0) * 0.35 * minorW;
   float core = clamp((r - gA.x * 0.048) / (gA.x * 0.096), 0.0, 1.0);
   return mix(1.0, mix(0.45, min(1.0, major + minor), gB.z), core);
 }
 
 // As gArm, for the dust: narrower lanes.
-float gLane(float theta, float r, vec4 gA, vec4 gB) {
+float gLane(float theta, float r, vec4 gA, vec4 gB, float minorW) {
   float phase = gB.x * (theta - gB.y * log(max(r, 1.0) / (gA.x * 0.077)));
   float major = pow(0.5 + 0.5 * cos(phase), 8.0);
-  float minor = pow(0.5 + 0.5 * cos(2.0 * phase + 1.3), 10.0) * 0.5;
+  float minor = pow(0.5 + 0.5 * cos(2.0 * phase + 1.3), 10.0) * 0.5 * minorW;
   float core = clamp((r - gA.x * 0.048) / (gA.x * 0.096), 0.0, 1.0);
   return mix(0.35, mix(0.3, min(1.0, major + minor), gB.z), core);
 }
@@ -172,7 +173,8 @@ vec2 gDiscPolar(vec3 p, vec4 gA, vec4 gC, vec4 gE) {
   float r = length(q);
   float theta = atan(q.y, q.x);
   theta += 0.2 * sin(r / (gA.x * 0.1) + gC.w) + 0.08 * sin(3.0 * theta + r / (gA.x * 0.048));
-  if (gE.x > 0.0) theta += gE.x * 0.7 * (gnoise(vec3(p.x, 0.0, p.z) / (gA.x * 0.16) + gC.w + 23.0) - 0.5);
+  // (The noise's scale shrinks inward with the radius: the inner arms wander as much as the outer ones.)
+  if (gE.x > 0.0) theta += gE.x * 1.4 * (gnoise(vec3(p.x, 0.0, p.z) / (0.5 * r + gA.x * 0.03) + gC.w + 23.0) - 0.5);
   return vec2(r, theta);
 }
 
@@ -278,7 +280,8 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
     float tau = 0.0;
     if (gC.y > 0.0) {
       float theta = polar.y;
-      float arm = gArmStructure(gArm(theta, r, gA, gB), p, theta, r, gA, gB, gC, gE);
+      float minorW = 1.0 - 0.8 * gE.x;
+      float arm = gArmStructure(gArm(theta, r, gA, gB, minorW), p, theta, r, gA, gB, gC, gE);
       // Far from the plane there are neither clouds nor dust to look up.
       float off = cross ? 0.0 : min(abs(ya), abs(yb));
       float clouds = off < 4.0 * gA.z ? gfbm(p / cell + gC.w, min(clamp(2.2 * cell / reach * stepLimit, 1.0, 64.0), cell / (2.0 * pixel * tb))) : 0.5;
@@ -329,7 +332,15 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
       // It gathers in narrow lanes along the inner edges of the arms, which the star clouds push about.
       // (Broken up and pushed about by the star clouds: real lanes are ragged arcs, not rings.)
       float laneTheta = theta + LANE_LEAD + 1.0 * (clouds - 0.5) + 0.35 * sway;
-      float lane = gArmStructure(gLane(laneTheta, r, gA, gB), p, laneTheta, r, gA, gB, gC, gE) * (0.45 + 1.1 * clouds);
+      // In a flocculent spiral the lanes wander further than the arms' light and break up with them: short
+      // ragged stretches of dust, not rings. (The Milky Way's, gE.x = 0, as they were.)
+      float tear = 1.0;
+      if (gE.x > 0.0) {
+        // (By up to about a radian of the pattern's phase, however many arms there are.)
+        laneTheta += gE.x * 5.0 / max(gB.x, 1.0) * (gnoise(vec3(p.x, 0.0, p.z) / (0.3 * r + gA.x * 0.02) + gC.w + 61.0) - 0.5);
+        tear = mix(1.0, smoothstep(0.3, 0.65, gnoise(vec3(p.x, 0.0, p.z) / (0.12 * r + gA.x * 0.01) + gC.w + 71.0)) * 1.6, gE.x);
+      }
+      float lane = gArmStructure(gLane(laneTheta, r, gA, gB, minorW), p, laneTheta, r, gA, gB, gC, gE) * tear * (0.45 + 1.1 * clouds);
       float ring = smoothstep(gA.x * 0.03, gA.x * 0.1, r) * edge;
       // No dust right around the camera: up close a single cloud would fill half the sky. (The Sun sits in
       // such a cavity, the Local Bubble, a few hundred light years across; every camera carries one along.)
@@ -342,7 +353,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
       float inner = exp(-(max(r, 0.35 * gA.x) - 0.5 * gA.x) / (1.4 * gA.y)) * mix(1.0, 0.55, smoothstep(0.35 * gA.x, 0.15 * gA.x, r));
       // (Inside the ring the clouds keep to the lanes: where the lane is weak there is hardly any.)
       float inLane = smoothstep(0.42 * gA.x, 0.25 * gA.x, r);
-      float laneW = mix(0.1 + 2.6 * lane, 0.03 + 3.2 * lane * lane, inLane);
+      float laneW = mix(0.1 + 2.6 * lane, 0.03 + 3.2 * lane * lane, inLane * (1.0 - 0.7 * gE.x));
       tau = gB.w * ring * inner * laneW * (0.1 + 1.6 * dense) * gas / 2200.0;
       }
     }
