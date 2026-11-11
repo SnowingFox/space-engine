@@ -84,6 +84,9 @@ export class Hud {
   private selected: Target | null = null;
   private lastText = 0;
   private toastTimer = 0;
+  private readonly speedNoteEl: HTMLElement;
+  private speedNoteTimer = 0;
+  private lastSetting = -1;
   private paused: boolean | null = null;
 
   constructor(
@@ -143,6 +146,7 @@ export class Hud {
     timeBtn('real', 'Real time (\\)', 'real');
 
     this.toastEl = el('div', 'toast', root);
+    this.speedNoteEl = el('div', 'speed-note', root);
     this.marker = el('div', 'marker', labelRoot, '<i></i><i></i><i></i><i></i>');
 
     this.browser = new SystemBrowser(el('div', 'panel browser', root), actions);
@@ -253,6 +257,16 @@ export class Hud {
     this.modeEl.classList.toggle('auto', f.auto);
     setText(this.velEl, formatSpeed(f.speed));
     setText(this.setEl, formatSpeed(f.speedSetting));
+    // A change of the speed setting shows top-centre for a moment, then fades.
+    if (f.speedSetting !== this.lastSetting) {
+      if (this.lastSetting > 0) {
+        this.speedNoteEl.textContent = formatSpeed(f.speedSetting);
+        this.speedNoteEl.classList.add('show');
+        clearTimeout(this.speedNoteTimer);
+        this.speedNoteTimer = window.setTimeout(() => this.speedNoteEl.classList.remove('show'), 1400);
+      }
+      this.lastSetting = f.speedSetting;
+    }
     this.limitEl.classList.toggle('show', f.limited);
     setText(this.placeEl, f.place);
     setText(this.placeDetailEl, f.placeDetail);

@@ -34,6 +34,13 @@ const input = new Input(canvas);
 const starfield = new Starfield(pipeline.pixelRatio);
 const cloud = new GalaxyCloud();
 pipeline.bgScene.add(makeDeepField(pipeline.pixelRatio), cloud.group, starfield.group);
+/** Where the camera was last frame (galactic, ly), for motion blur. */
+const lastGal = new THREE.Vector3(NaN, 0, 0);
+const travel = new THREE.Vector3();
+/** Smoothed camera velocity, ly/s. */
+const flight = new THREE.Vector3();
+/** Motion blur: the stars streak over the path they cross during one exposure, seconds. */
+const EXPOSURE = 1 / 30;
 
 const sol = makeSol(SOL_POS.x, SOL_POS.y, SOL_POS.z);
 const earth: Target = { kind: 'body', star: sol, body: generateSystem(sol).planets[2] };
@@ -492,6 +499,13 @@ function frame(now: number): void {
 
   player.galactic(gal);
   cloud.update(gal, pipeline.pixelsPerRadian, 1);
+  travel.set(gal.x - lastGal.x, gal.y - lastGal.y, gal.z - lastGal.z);
+  lastGal.set(gal.x, gal.y, gal.z);
+  // (A jump, e.g. to a scenic spot or after a reload, is not a flight: no blur from it.)
+  if (!Number.isFinite(travel.x) || dt <= 0 || travel.length() > Math.max(player.speed / KM_PER_LY, 1) * dt * 20) travel.set(0, 0, 0);
+  else travel.divideScalar(dt);
+  flight.lerp(travel, 1 - Math.exp(-dt / 0.08));
+  starfield.setMotion(travel.copy(flight).multiplyScalar(EXPOSURE), pipeline.pixelsPerRadian);
   // With a sun in the field of view, eyes and cameras stop down and the stars are gone.
   let dazzle = 0;
   if (view) {

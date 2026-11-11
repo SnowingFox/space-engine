@@ -4,7 +4,8 @@ import { temperatureToRgb, type StarData } from '../universe/stars';
 
 const RADIUS = 3; // sectors loaded around the camera in each direction, per level
 
-const VERT = /* glsl */ `
+// Shared by the points and by their motion streaks: the light of one star.
+const STAR_LIGHT = /* glsl */ `
 attribute vec3 aColor;
 attribute float aLum;
 attribute float aId;
@@ -12,6 +13,20 @@ uniform float uHideId;
 uniform float uPixelRatio;
 uniform float uTwinkle;  // seen through air, starlight flickers
 uniform float uTime;
+uniform vec3 uTrail;     // how far the camera moved during one exposure, ly (universe axes)
+uniform float uPpr;      // device pixels per radian
+// Length on screen, in device pixels, of the streak a star at 'pos' leaves during one exposure.
+float streakPx(vec3 pos) {
+  vec3 a = (modelViewMatrix * vec4(pos, 1.0)).xyz;
+  vec3 b = (modelViewMatrix * vec4(pos + uTrail, 1.0)).xyz;
+  float la = length(a), lb = length(b);
+  if (la < 1e-6 || lb < 1e-6) return 0.0;
+  return acos(clamp(dot(a, b) / (la * lb), -1.0, 1.0)) * uPpr;
+}
+`;
+
+const VERT = /* glsl */ `
+${STAR_LIGHT}
 varying vec3 vColor;
 void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
@@ -29,10 +44,40 @@ void main() {
   float ph = fract(aId * 0.6180339) * 6.2831853;
   float flicker = sin(uTime * (9.0 + 7.0 * fract(aId * 0.31)) + ph) * sin(uTime * (3.1 + 2.0 * fract(aId * 0.77)) + 2.0 * ph);
   intensity *= 1.0 + uTwinkle * 0.6 * flicker;
+  // Moving fast, a star's light is spread along its streak (drawn by the lines below): the point keeps only its share.
+  float px = size * uPixelRatio;
+  intensity *= px / max(px, streakPx(position));
   vColor = aColor * intensity;
-  gl_PointSize = size * uPixelRatio;
+  gl_PointSize = px;
   gl_Position = projectionMatrix * mv;
   if (abs(aId - uHideId) < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+
+// Motion streaks: what a camera sees of the real stars while it flies past them, each star's
+// light smeared over the path it crossed on screen during one exposure.
+const STREAK_VERT = /* glsl */ `
+${STAR_LIGHT}
+attribute float aEnd;     // 0: where the star is now, 1: where it was at the start of the exposure
+varying vec3 vColor;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  float d = max(length(mv.xyz), 1e-4);
+  float mag = -2.5 * log(aLum / (d * d)) / 2.302585 - 2.74;
+  float intensity = clamp(pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0) * smoothstep(8.8, 6.0, mag);
+  float size = clamp(2.7 - mag * 0.45, 1.0, 3.8) * uPixelRatio;
+  float len = streakPx(position);
+  // The same light as the point would carry, spread over the streak's length (a line is a pixel wide).
+  float spread = size * size / max(len, 1.0);
+  vColor = aColor * intensity * spread * smoothstep(size, 2.0 * size, len) * (1.0 - 0.6 * aEnd);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position + uTrail * aEnd, 1.0);
+  if (abs(aId - uHideId) < 0.5 || len < size) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+const STREAK_FRAG = /* glsl */ `
+varying vec3 vColor;
+void main() {
+  gl_FragColor = vec4(vColor, 1.0);
 }
 `;
 
@@ -49,6 +94,7 @@ void main() {
 
 interface Level {
   points: THREE.Points;
+  streaks: THREE.LineSegments;
   stars: StarData[];
   key: string;
   origin: THREE.Vector3;
@@ -60,12 +106,26 @@ export class Starfield {
   readonly group = new THREE.Group();
   private readonly levels: Level[] = [];
   private readonly material: THREE.ShaderMaterial;
+  private readonly streakMat: THREE.ShaderMaterial;
 
   constructor(pixelRatio: number) {
     this.material = new THREE.ShaderMaterial({
       vertexShader: VERT,
       fragmentShader: FRAG,
-      uniforms: { uHideId: { value: -1 }, uPixelRatio: { value: pixelRatio }, uTwinkle: { value: 0 }, uTime: { value: 0 } },
+      uniforms: {
+        uHideId: { value: -1 }, uPixelRatio: { value: pixelRatio }, uTwinkle: { value: 0 }, uTime: { value: 0 },
+        uTrail: { value: new THREE.Vector3() }, uPpr: { value: 1000 },
+      },
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+    });
+    // The streaks share every uniform with the points.
+    this.streakMat = new THREE.ShaderMaterial({
+      vertexShader: STREAK_VERT,
+      fragmentShader: STREAK_FRAG,
+      uniforms: this.material.uniforms,
       blending: THREE.AdditiveBlending,
       depthTest: false,
       depthWrite: false,
@@ -74,9 +134,25 @@ export class Starfield {
     for (let l = 0; l < SECTOR_LEVELS; l++) {
       const points = new THREE.Points(new THREE.BufferGeometry(), this.material);
       points.frustumCulled = false;
-      this.group.add(points);
-      this.levels.push({ points, stars: [], key: '', origin: new THREE.Vector3(), cache: new Map() });
+      const streaks = new THREE.LineSegments(new THREE.BufferGeometry(), this.streakMat);
+      streaks.frustumCulled = false;
+      streaks.visible = false;
+      this.group.add(points, streaks);
+      this.levels.push({ points, streaks, stars: [], key: '', origin: new THREE.Vector3(), cache: new Map() });
     }
+  }
+
+  /**
+   * Motion blur of the stars: trail is how far the camera moved (ly, universe axes) during one
+   * exposure; pixelsPerRadian converts it into streak lengths on screen.
+   */
+  setMotion(trail: THREE.Vector3, pixelsPerRadian: number): void {
+    const u = this.material.uniforms;
+    (u.uTrail.value as THREE.Vector3).copy(trail);
+    u.uPpr.value = pixelsPerRadian;
+    // (Unused below a fraction of a light year per exposure: nothing near enough would streak.)
+    const moving = trail.lengthSq() > 1e-4;
+    for (const lv of this.levels) lv.streaks.visible = moving && lv.stars.length > 0;
   }
 
   /** twinkle: 0 in space, 1 at the bottom of an Earth-like atmosphere. */
@@ -100,6 +176,7 @@ export class Starfield {
       const key = `${cx},${cy},${cz}`;
       if (key !== lv.key) this.rebuild(l, cx, cy, cz, key);
       lv.points.position.set(lv.origin.x - cam.x, lv.origin.y - cam.y, lv.origin.z - cam.z);
+      lv.streaks.position.copy(lv.points.position);
     }
   }
 
@@ -141,6 +218,27 @@ export class Starfield {
     ng.setAttribute('aLum', new THREE.BufferAttribute(lum, 1));
     ng.setAttribute('aId', new THREE.BufferAttribute(id, 1));
     lv.points.geometry = ng;
+
+    // Each star twice, for the two ends of its streak.
+    const pos2 = new Float32Array(n * 6), col2 = new Float32Array(n * 6);
+    const lum2 = new Float32Array(n * 2), id2 = new Float32Array(n * 2), end = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      pos2.set(pos.subarray(i * 3, i * 3 + 3), i * 6);
+      pos2.set(pos.subarray(i * 3, i * 3 + 3), i * 6 + 3);
+      col2.set(col.subarray(i * 3, i * 3 + 3), i * 6);
+      col2.set(col.subarray(i * 3, i * 3 + 3), i * 6 + 3);
+      lum2[i * 2] = lum2[i * 2 + 1] = lum[i];
+      id2[i * 2] = id2[i * 2 + 1] = id[i];
+      end[i * 2 + 1] = 1;
+    }
+    lv.streaks.geometry.dispose();
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.BufferAttribute(pos2, 3));
+    sg.setAttribute('aColor', new THREE.BufferAttribute(col2, 3));
+    sg.setAttribute('aLum', new THREE.BufferAttribute(lum2, 1));
+    sg.setAttribute('aId', new THREE.BufferAttribute(id2, 1));
+    sg.setAttribute('aEnd', new THREE.BufferAttribute(end, 1));
+    lv.streaks.geometry = sg;
   }
 
   get starCount(): number {

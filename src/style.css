@@ -143,6 +143,14 @@ kbd {
 }
 .toast.show { opacity: 1; }
 
+/* Speed setting while it changes: text only, top centre, where a notch would be. */
+.speed-note {
+  position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+  font-size: 15px; letter-spacing: 0.04em; color: #e8eef8; text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+  white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 0.5s;
+}
+.speed-note.show { opacity: 1; transition: opacity 0.12s; }
+
 /* ---- Bottom dock: solar system browser ---------------------------------- */
 
 .browser { left: var(--gap); right: var(--gap); bottom: var(--gap); height: 182px; display: none; padding-bottom: 4px; }
