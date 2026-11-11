@@ -89,16 +89,31 @@ float craters(vec3 p, float detail, float minFreq) {
     }
     fade *= smoothstep(minFreq * 0.5, minFreq, freq);
     vec3 at;
-    vec3 w = worleyAt(p * freq + uSeed, at);
+    vec3 q = p * freq + uSeed;
+    vec3 w = worleyAt(q, at);
     // A crater that reaches the border of its cell fades out there rather than being cut off.
     fade *= smoothstep(0.0, 0.1, w.z - w.x);
-    float r = 0.12 + 0.19 * w.y;
-    float d = w.x / r;
-    float bowl = (smoothstep(0.0, 1.0, d) - 1.0) * 0.6;           // depression
-    float rim = exp(-pow((d - 1.0) * 5.0, 2.0)) * 0.45;           // raised rim
+    // Not every cell holds one (impacts are random, and the smaller ones are many more), and they come
+    // in all sizes, most of them small for their cell.
+    float id = w.y, id2 = fract(id * 7.31), age = fract(id * 13.7);
+    fade *= step(id2, 0.45 + 0.03 * float(i));
+    float r = 0.07 + 0.26 * id * id;
+    // Not quite round: a little elongated, a little lobed.
+    vec3 rel = q - at;
+    float len = length(rel);
+    vec3 dir = rel / max(len, 1e-6);
+    float d = len / r;
+    // (Lobes by direction from the centre only: a few around the rim, never finer than the crater.)
+    d *= 1.0 + 0.06 * sin(3.0 * dot(dir, vec3(0.8, 0.5, 0.33)) + id * 40.0) + 0.04 * sin(5.0 * dot(dir, vec3(-0.3, 0.9, 0.3)) + id * 17.0);
+    // Age softens them: old craters are shallow, their rims low and worn wide; fresh ones are deep bowls with
+    // sharp raised rims and their ejecta spread around.
+    float worn = mix(0.14, 0.4, age);
+    float bowl = (d * d - 1.0) * 0.55 * mix(1.0, 0.3, age);
+    float rim = 0.4 * mix(1.0, 0.45, age) * exp(-pow((d - 1.0) / worn, 2.0));
+    float ejecta = 0.06 * (1.0 - age) * exp(-(d - 1.0) * 2.2) * smoothstep(1.0, 1.25, d);
     // Basins are shallow for their width; small craters are bowls of constant proportions.
     float depth = min(amp, 0.6 / (freq * uHeightScale));
-    h += depth * fade * (d < 1.0 ? bowl + rim : rim);
+    h += depth * fade * (d < 1.0 ? bowl + rim : rim + ejecta);
     freq *= 2.3;
     amp *= 0.7;
   }
@@ -296,10 +311,52 @@ float terrain(vec3 p, float detail, out float rough) {
 
 // Metre-scale relief, continuing the terrain below what float32 can address globally.
 // fp: fine coordinates (see FINE_FREQ), wrapped to the noise period on the CPU.
+// Fades a feature of 'f' cycles per fine cell in as the pixels can show it (d: cells per pixel footprint).
+float bandFade(float d, float f) {
+  return clamp(d / f - 1.0, 0.0, 1.0);
+}
+
 float fineRelief(vec3 fp, float detail, float rough) {
   float d = detail / FINE_FREQ;
   if (d <= 1.0) return 0.0;
-  return (3.0e-6 / uHeightScale) * (0.3 + rough) * (pfbm(fp, d) - 0.5);
+  float unit = 3.0e-6 / uHeightScale;   // ~20 m on an Earth-sized world (a fine cell is ~50 m)
+  float h = (0.3 + rough) * (pfbm(fp, d) - 0.5);
+  // What the ground is made of, at the scale of a person: every coordinate scale below is a whole number,
+  // so the patterns repeat with the fine coordinates' period and never show a seam.
+  float plain = 1.0 - smoothstep(0.15, 0.55, max(rough, 0.0));
+  if (uType == 1) {
+    // Sand seas: dunes a few hundred metres apart on the level ground, wind ripples on their flanks.
+    float dune = 1.0 - abs(pnoise(fp * 3.0 + 7.0) * 2.0 - 1.0);
+    h += plain * 0.55 * (dune * dune - 0.4) * bandFade(d, 3.0);
+    float warp = pnoise(fp * 8.0 + 3.0) * 3.0;
+    float ripple = sin(6.2831853 * (dot(fp, vec3(60.0, 0.0, 80.0)) * 1.0 + warp));
+    h += plain * 0.0035 * ripple * bandFade(d, 100.0);
+  }
+  if (uType == 1 || uType == 2 || (uType == 0 && rough > 0.25)) {
+    // Stones and boulders, scattered more thickly where the ground is rugged: rounded, half-buried lumps
+    // of a few metres and a few decimetres, one in some of the cells of a cellular pattern.
+    float many = mix(0.25, 0.6, clamp(rough, 0.0, 1.0)) * (uType == 1 ? 0.5 + 0.5 * (1.0 - plain) : 1.0);
+    float stones = 0.0;
+    if (bandFade(d, 9.0) > 0.0) {
+      vec2 w = worley(fp * 9.0 + 11.0);
+      float r = 0.15 + 0.2 * fract(w.y * 7.7);
+      float x = clamp(1.0 - w.x / r, 0.0, 1.0);
+      stones += 0.05 * step(w.y, many) * x * sqrt(x) * bandFade(d, 9.0);
+    }
+    if (bandFade(d, 47.0) > 0.0) {
+      vec2 w = worley(fp * 47.0 + 5.0);
+      float r = 0.12 + 0.2 * fract(w.y * 5.3);
+      float x = clamp(1.0 - w.x / r, 0.0, 1.0);
+      stones += 0.012 * step(w.y, many * 1.3) * x * sqrt(x) * bandFade(d, 47.0);
+    }
+    h += stones;
+  }
+  if (uType == 3) {
+    // Sastrugi: ridges carved into the snow by the wind, long and narrow.
+    float s = 1.0 - abs(pnoise(vec3(fp.x * 6.0, fp.y * 40.0, fp.z * 6.0) + 13.0) * 2.0 - 1.0);
+    h += 0.008 * s * s * bandFade(d, 40.0);
+  }
+  return unit * h;
 }
 
 // Height above the datum (sea level on wet worlds) in planet radii.
@@ -441,7 +498,7 @@ ${LOGDEPTH_FRAG_PARS}
 ${PLANET_COMMON}
 ${RING_DENSITY}
 ${SURFACE_MAPS}
-${atmoCommon(8)}
+${atmoCommon(12)}
 ${ECLIPSE}
 uniform float uAtmoTop;     // planet radii
 uniform vec3 uShineDir;     // towards the neighbour that lights the night side (object space)

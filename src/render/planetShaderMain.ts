@@ -57,7 +57,7 @@ void main() {
     // Earth-sized world), so the height worked out from it climbs in stairs and its slope across
     // pixels is noise. There the large-scale slope comes from the vertices instead, smoothly
     // interpolated; the fine relief (on its own exact coordinates) still adds the small-scale slope.
-    float exact = vGrad.w > 0.0 ? smoothstep(4e-7, 2e-6, px) : 1.0;
+    float exact = vGrad.w > 0.0 ? smoothstep(1.5e-6, 8e-6, px) : 1.0;
     grad = mix(vGrad.xyz, grad, exact) + (dFdx(f0) * r1 + dFdy(f0) * r2) / det;
     if (vSkirt > 0.0) grad = vec3(0.0);
     h += f0;
@@ -300,7 +300,10 @@ void main() {
   // Aerial perspective: the air between the camera and the ground.
   if (uAtmoDensity > 0.0) {
     vec3 od;
-    vec3 haze = atmoScatterSteps(uCamObj, -V, length(vView), L, uAtmoTop, uAtmoColor, uAtmoDensity, ATMO_VIEW_STEPS, true, od);
+    // Eight steps, as many as the sky shell (12) where the ray grazes the planet: just inside the limb the
+    // way through the air is thousands of kilometres, and the two integrals must agree across it.
+    int most = 8 + int(4.0 * (1.0 - smoothstep(0.05, 0.25, dot(V, n))));
+    vec3 haze = atmoScatterSteps(uCamObj, -V, length(vView), L, uAtmoTop, uAtmoColor, uAtmoDensity, most, true, od);
     col = col * exp(-od) + uSunColor * ecl * haze;
   }
   gl_FragColor = vec4(col, 1.0);
@@ -315,7 +318,7 @@ export const CLOUD_FRAG = /* glsl */ `
 ${LOGDEPTH_FRAG_PARS}
 ${PLANET_COMMON}
 ${SURFACE_MAPS}
-${atmoCommon(6)}
+${atmoCommon(12)}
 ${ECLIPSE}
 uniform vec3 uShineDir;
 uniform vec3 uShine;
@@ -352,7 +355,9 @@ void main() {
   col += tint * uShine * max(dot(n, uShineDir), 0.0);
   if (uAtmoDensity > 0.0) {
     vec3 od;
-    vec3 haze = atmoScatter(uCamObj, view / dist, dist, L, uAtmoTop, uAtmoColor, uAtmoDensity, od);
+    // (As for the ground: as many steps as the sky shell where the ray grazes the deck.)
+    int most = 6 + int(6.0 * (1.0 - smoothstep(0.05, 0.25, abs(dot(view / dist, n)))));
+    vec3 haze = atmoScatterSteps(uCamObj, view / dist, dist, L, uAtmoTop, uAtmoColor, uAtmoDensity, most, true, od);
     col = col * exp(-od) + uSunColor * ecl * haze;
   }
   gl_FragColor = vec4(col, c * (uMapInfo.w > 0.5 ? 1.0 : 0.94));

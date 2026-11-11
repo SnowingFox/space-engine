@@ -66,8 +66,8 @@ Object.assign(VIEWS, {
   // The user's night view: Vela and Carina low over the horizon, from 350 m.
   Lvela: ["nightToward('Carina', 0.35, 4)"],
   // Orbital sunrise from 1 636 km: the Sun just over the limb (the user's seam report).
-  Lsunrise: ["viewB('Earth', 1636, 97, 0.33, 0.16)"],
-  Lsunrise400: ["viewB('Earth', 400, 95, 0.35, 0.33)"],
+  Lsunrise: ["limbSun(1636, 20, 28, 60, 35)"],
+  Lsunrise400: ["limbSun(400, 15, 22, 60, 35)"],
   // The night limb from ISS altitude.
   Llimb: ["poseAt({ kind: 'body', star: 'sol', planet: 2, alt: 420, sun: 2.6, az: 2.3, turn: 0.0, pitch: -0.2 }, 'Earth', 20)"],
   // Mercury from 43 km: the Sun 5 degrees up, in view; and high (40 degrees from the zenith), looking at the ground away from it.
@@ -76,6 +76,17 @@ Object.assign(VIEWS, {
   // Close-ups of a generated world's ground, looking down from 20 m and 2 m.
   Lgen20: ["se.scenic('terra-dusk'); setTimeout(() => lookDown(0.02, 80), 3000)"],
   Lgen2: ["se.scenic('terra-dusk'); setTimeout(() => lookDown(0.002, 60), 3000)"],
+  // Saturn backlit from 200 000 km, the Sun 15 degrees off the line through it (the coordinator's test).
+  Lsatback: ["behind('Saturn', 200000, 15, 70, '2020-03-01T00:00:00Z')"],
+  Lsatback2: ["behind('Saturn', 260000, 25, 70, '2025-11-01T00:00:00Z')"],
+  // The Alps by geography at fixed moments (summer morning, low sun in the evening), for shadows and ground detail.
+  Lalpsam: ["at('2025-07-01T07:30:00Z', () => geoB('Earth', 46.45, 8.1, 1.5, 120, -7))"],
+  Lalpspm: ["at('2025-07-01T18:30:00Z', () => geoB('Earth', 46.45, 8.1, 1.2, 240, -5))"],
+  // From 70 AU (and 5 AU) looking back at the inner Solar System: the Sun a point, the planets wandering stars.
+  Lfar70: ["at('2025-06-01T00:00:00Z', () => { se.getView().showOrbits = false; p.local.set(0, 2.0e9, 1.03e10); aimAt(p.local.clone().set(0, 0, 0)); }, 40)"],
+  Lfar5: ["at('2025-06-01T00:00:00Z', () => { se.getView().showOrbits = false; p.local.set(0, 1.5e8, 7.4e8); aimAt(p.local.clone().set(0, 0, 0)); }, 60)"],
+  // Earth and the Moon seen from near Mars: two points of light.
+  Learthmars: ["at('2025-06-01T00:00:00Z', () => { se.getView().showOrbits = false; const t = se.state().simTime; const c = bodyAt('Mars', t), e = bodyAt('Earth', t); se.placeAt({ kind: 'body', star: se.earth.star, body: bodyState('Mars').body }); p.local.copy(c).addScaledVector(e.clone().sub(c).normalize(), 20000); aimAt(e); }, 20)"],
   // Earth's ground at noon and at dusk (cloud shadows, sky light).
   Lnoon: ["poseLL({ kind: 'body', star: 'sol', planet: 2, alt: 2.5, sun: 0.5, az: 2.6, turn: 1.2, pitch: -0.2 }, 'Earth', 46.4, 8.2)"],
   Ldusk: ["poseLL({ kind: 'body', star: 'sol', planet: 2, alt: 1.0, sun: 1.45, az: 2.6, turn: 2.2, pitch: -0.05 }, 'Earth', 46.4, 8.2)"],

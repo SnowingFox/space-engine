@@ -20,21 +20,26 @@ uniform vec3 uPole;       // world space, the magnetic axis
 uniform vec2 uShell;      // bottom and top of the glowing layer, planet radii
 uniform float uStrength;
 uniform float uTime;
+uniform float uActivity;  // 0 quiet .. 1 storm: how far equatorward the oval reaches and how bright it is
 uniform vec3 uLow;        // colour of the bright lower border
 uniform vec3 uHigh;       // colour of the tall faint rays
 varying vec3 vWorld;
 
-const int STEPS = 20;
+// Samples per stretch of the ray: 20 from space, more from down in the air, where rays run a long way
+// through the layer and the curtains (a few kilometres thick) must still come out sharp.
+const int MAX_STEPS = 64;
+uniform float uSteps;
 
 // Spacing of the samples along the ray (planet radii). The curtains are far thinner than that when
 // marched from afar, so each is widened to the spacing (keeping its total light) and the fine rays
 // fade to their mean: the same curtains at every distance, only sharper close up.
 float gStep = 0.0;
 
-// A curtain of half-width w across the oval, at offset x, blurred to the sample spacing.
-float curtain(float x, float w) {
+// A curtain of half-width w across the oval, at offset x, blurred to the sample spacing; 'total' is how much
+// light it gives off across its width (in units of the old, broad curtains), whatever the width.
+float curtain(float x, float w, float total) {
   float s2 = w * w + 0.25 * gStep * gStep;
-  return w * inversesqrt(s2) * exp(-0.5 * x * x / s2);
+  return total * 0.00477 * inversesqrt(s2) * exp(-0.5 * x * x / s2);
 }
 
 // Light given off per unit length (planet radii) at p.
@@ -49,7 +54,7 @@ vec3 glow(vec3 p) {
   float cz = dot(dir, uPole);
   float colat = acos(min(abs(cz), 1.0));
   // The oval sits further from the pole on the side facing away from the star.
-  float oval = 0.33 - 0.1 * s / max(sqrt(1.0 - cz * cz), 0.2);
+  float oval = 0.33 + 0.07 * (uActivity - 0.4) - 0.1 * s / max(sqrt(1.0 - cz * cz), 0.2);
   float off = colat - oval;
   if (abs(off) > 0.16) return vec3(0.0);
   // The curtains wander, slowly; both hemispheres get their own.
@@ -57,20 +62,33 @@ vec3 glow(vec3 p) {
   float drift = uTime * 0.012;
   float wander = vnoise(q + drift) - 0.5;
   float fold = vnoise(q * 5.5 - drift * 2.0) - 0.5;
-  float a = off - 0.07 * wander - 0.014 * fold;
-  float b = off + 0.045 + 0.06 * wander + 0.012 * fold;
-  float arcs = curtain(a, 0.00477) + 0.6 * curtain(b, 0.00408);
-  float veil = 0.07 * exp(-off * off * 300.0);
+  // Small folds and curls along each curtain, a few tens of kilometres across, faded out when marched from afar.
+  float curl = (vnoise(q * 40.0 + drift * 4.0) - 0.5) * clamp(1.5 - gStep * 300.0, 0.0, 1.0);
+  float a = off - 0.07 * wander - 0.014 * fold - 0.003 * curl;
+  float b = off + 0.045 + 0.06 * wander + 0.012 * fold + 0.0025 * curl;
+  // Curtains a few kilometres thick, as real ones are (a kilometre or two), with a fainter second arc poleward.
+  float arcs = curtain(a, 0.0006, 1.0) + 0.6 * curtain(b, 0.0005, 0.85);
+  // Never a uniform ring: brightenings travel along the oval (substorms), patches pulse, and quiet
+  // stretches fade to almost nothing.
+  float along = vnoise(dir * 2.2 + sign(cz) * 5.0 + vec3(uTime * 0.004, 0.0, -uTime * 0.003));
+  float surge = vnoise(dir * 6.0 - vec3(0.0, uTime * 0.01, uTime * 0.008));
+  float pulse = 0.85 + 0.15 * sin(uTime * 1.3 + surge * 20.0);
+  arcs *= smoothstep(0.25, 0.75, along) * (0.4 + 1.6 * surge * surge) * pulse * (0.4 + 1.2 * uActivity);
+  float veil = 0.025 * exp(-off * off * 300.0);
   if (arcs + veil < 0.004) return vec3(0.0);
   // Rays: brightness varies along a curtain, and each ray reaches its own height.
   float ray = mix(0.5, vnoise(dir * 260.0 + drift * 6.0), clamp(1.5 - gStep * 520.0, 0.0, 1.0));
   float fine = mix(0.5, vnoise(dir * 1100.0 - drift * 9.0), clamp(1.5 - gStep * 2200.0, 0.0, 1.0));
   float lively = 0.25 + 1.5 * ray * ray * (0.5 + fine);
+  // Rays flicker a little, each at its own few hertz.
+  lively *= 1.0 + 0.08 * sin(uTime * (6.0 + 40.0 * fine) + ray * 30.0);
   float reach = 4.0 + 9.0 * fine;
   float low = smoothstep(0.0, 0.05, alt) * exp(-alt * reach);
   float high = smoothstep(0.08, 0.4, alt) * (1.0 - smoothstep(0.55, 1.0, alt));
   float hem = exp(-pow((alt - 0.025) / 0.02, 2.0));
-  vec3 c = uLow * low + uHigh * (0.16 * high) + vec3(0.45, 0.2, 0.9) * (0.35 * hem * ray);
+  // Greenish-white at the sharp lower edge, green above, faint red at the top; a magenta hem in storms.
+  vec3 c = mix(uLow, vec3(0.75, 1.0, 0.8), 0.3 * smoothstep(0.1, 0.0, alt)) * low + uHigh * (0.07 * high)
+    + vec3(0.65, 0.2, 0.75) * (0.3 * hem * ray * uActivity);
   return c * ((arcs * lively + veil) * night);
 }
 
@@ -92,14 +110,15 @@ void main() {
   float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
   vec3 col = vec3(0.0);
   if (a1 > t0) {
-    float dt = (a1 - t0) / float(STEPS);
-    gStep = dt;
-    for (int i = 0; i < STEPS; i++) col += glow(ro + rd * (t0 + (float(i) + jitter) * dt)) * dt;
+    float dt = (a1 - t0) / uSteps;
+    // (What blurs a curtain is how far each step moves across the ground, not up through the layer.)
+    gStep = dt * length(cross(rd, normalize(ro + rd * (0.5 * (t0 + a1)))));
+    for (int i = 0; i < MAX_STEPS; i++) { if (float(i) >= uSteps) break; col += glow(ro + rd * (t0 + (float(i) + jitter) * dt)) * dt; }
   }
   if (t1 > b0) {
-    float dt = (t1 - b0) / float(STEPS);
-    gStep = dt;
-    for (int i = 0; i < STEPS; i++) col += glow(ro + rd * (b0 + (float(i) + jitter) * dt)) * dt;
+    float dt = (t1 - b0) / uSteps;
+    gStep = dt * length(cross(rd, normalize(ro + rd * (0.5 * (b0 + t1)))));
+    for (int i = 0; i < MAX_STEPS; i++) { if (float(i) >= uSteps) break; col += glow(ro + rd * (b0 + (float(i) + jitter) * dt)) * dt; }
   }
   col *= uStrength;
   if (col.r + col.g + col.b < 1e-4) discard;
@@ -145,13 +164,16 @@ export class Aurora {
         uPole: { value: new THREE.Vector3(0, 1, 0) },
         uShell: { value: new THREE.Vector2(bottom, this.top) },
         uStrength: { value: 0 },
+        uSteps: { value: 20 },
+        uActivity: { value: 0.5 },
         uTime: { value: 0 },
         // Oxygen green below and red above on worlds like ours; hydrogen pink and blue on the giants.
         uLow: { value: giant ? new THREE.Vector3(0.9, 0.3, 0.7) : new THREE.Vector3(0.25, 1.0, 0.45) },
         uHigh: { value: giant ? new THREE.Vector3(0.3, 0.4, 1.0) : new THREE.Vector3(1.0, 0.12, 0.2) },
       },
     });
-    this.material.userData.strength = (strength * 80 * 0.022) / h;
+    // (A giant's aurora shines mostly in the ultraviolet: in visible light it is a faint glow.)
+    this.material.userData.strength = (strength * 80 * 0.022 * (giant ? 0.1 : 1)) / h;
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.scale.setScalar(body.radius * this.top * 1.02);
     this.mesh.frustumCulled = false;
@@ -183,9 +205,13 @@ export class Aurora {
     this.mesh.visible = on > 0.003;
     if (!this.mesh.visible) return;
     u.uStrength.value = on * (this.material.userData.strength as number);
+    u.uSteps.value = Math.round(THREE.MathUtils.lerp(20, 64, low));
     u.uCenter.value.copy(rel);
     u.uSunDir.value.copy(sunDir);
     u.uTime.value = realTime;
+    // Activity wanders over hours, its own way on each world (sums of slow sines at unrelated rates).
+    const t = realTime / 3600 + this.body.seed * 7.3;
+    u.uActivity.value = THREE.MathUtils.clamp(0.5 + 0.3 * Math.sin(t * 0.9) * Math.sin(t * 0.37 + 1.3) + 0.2 * Math.sin(t * 2.3 + 0.4), 0.05, 1);
     // Seen from outside the near face of the shell is drawn, from within the far one, so the ground hides what is behind it.
     this.material.side = inside ? THREE.BackSide : THREE.FrontSide;
     // Under the cloud deck from below, over it from above.

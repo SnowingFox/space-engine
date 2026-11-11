@@ -35,15 +35,17 @@ float shadowCascade(int i, vec3 p, vec3 nrm, out float trust) {
   if (trust <= 0.0) return 1.0;
   float depth = ls.z * 0.5 + 0.5 - SHADOW_TEXEL * box.x / box.y;
   vec2 uv = ls.xy * 0.5 + 0.5;
-  // Four filtered taps in either cascade: a single one leaves the wide cascade's texels
-  // as stair-steps along every ridge a few kilometres off.
+  // A 3 x 3 tent of filtered taps, a texel apart: fewer leave the shadow map's texels as stair-steps
+  // along every sunlit ridge and snow edge.
   float lit = 0.0;
   float side = float(i);
-  for (int k = 0; k < 4; k++) {
-    vec2 o = (vec2(float(k & 1), float(k >> 1)) - 0.5) * 1.3 * SHADOW_TEXEL;
-    lit += texture(uShadowMap, vec3((uv.x + o.x + side) * 0.5, uv.y + o.y, depth));
+  for (int k = 0; k < 9; k++) {
+    vec2 g = vec2(float(k % 3), float(k / 3)) - 1.0;
+    float w = (2.0 - abs(g.x)) * (2.0 - abs(g.y));
+    vec2 o = g * SHADOW_TEXEL;
+    lit += w * texture(uShadowMap, vec3((uv.x + o.x + side) * 0.5, uv.y + o.y, depth));
   }
-  return lit * 0.25;
+  return lit / 16.0;
 }
 
 float terrainShadow(vec3 p, vec3 nrm) {

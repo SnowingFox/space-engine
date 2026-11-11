@@ -204,6 +204,9 @@ export class PlanetView {
           // Oxygen glows at night; worlds without free oxygen stay dark.
           uAirglow: { value: body.type === 'terran' || body.type === 'ocean' ? 1 : 0 },
           uGiant: { value: solid ? 0 : 1 },
+          uShineDir: { value: new THREE.Vector3(0, 1, 0) },
+          uShine: { value: new THREE.Color(0, 0, 0) },
+          uEcliptic: { value: new THREE.Vector3(0, 1, 0) },
           ...eclipseUniforms(),
         },
       });
@@ -374,7 +377,13 @@ export class PlanetView {
     toPlanet((u.uShineDir.value as THREE.Vector3).copy(light.shineDir));
     (u.uShine.value as THREE.Color).copy(light.shine);
     (u.uRingShine.value as THREE.Color).copy(light.ringShine);
-    if (this.atmoMat) setEclipse(this.atmoMat.uniforms, light, rel, r, toWorld);
+    if (this.atmoMat) {
+      const au = this.atmoMat.uniforms;
+      setEclipse(au, light, rel, r, toWorld);
+      (au.uShineDir.value as THREE.Vector3).copy(light.shineDir);
+      (au.uShine.value as THREE.Color).copy(light.shine);
+      (au.uEcliptic.value as THREE.Vector3).copy(light.orbitNormal);
+    }
     if (this.ringMat) setEclipse(this.ringMat.uniforms, light, rel, r, toRing);
   }
 

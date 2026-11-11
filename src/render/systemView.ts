@@ -3,7 +3,7 @@ import { bodyPosition, type BodyData, type SystemData } from '../universe/bodies
 import type { Obstacle } from '../game/player';
 import { atmoTransmittance } from './atmosphereScatter';
 import { LOGDEPTH_FRAG, LOGDEPTH_FRAG_PARS, LOGDEPTH_VERT, LOGDEPTH_VERT_PARS } from './glsl';
-import { computeLight, discCover, makeBodyLight, type BodyLight } from './lighting';
+import { albedoOf, computeLight, discCover, makeBodyLight, type BodyLight } from './lighting';
 import { PlanetView } from './planet';
 import { StarView } from './star';
 
@@ -31,6 +31,39 @@ uniform float uOpacity;
 varying float vAlpha;
 void main() {
   gl_FragColor = vec4(uColor * (vAlpha * uOpacity), 1.0);
+  ${LOGDEPTH_FRAG}
+}
+`;
+// Bodies too small to show a disc: points of light like the stars (starfield.ts), with the same profile
+// and the same law from apparent magnitude to brightness and size, depth-tested so nearer bodies hide them.
+const DOT_VERT = /* glsl */ `
+${LOGDEPTH_VERT_PARS}
+attribute vec3 color;      // the body's colour
+attribute vec2 aMag;       // apparent magnitude, angular radius (radians)
+uniform float uPpr;        // device pixels per radian
+uniform float uPixelRatio;
+varying vec3 vColor;
+void main() {
+  float mag = aMag.x;
+  float intensity = clamp(1.25 * pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0) * smoothstep(8.0, 5.2, mag);
+  float size = clamp(2.1 - mag * 0.26, 1.0, 3.0) * uPixelRatio;
+  // Into the resolved disc: gone once the body is a couple of pixels across.
+  intensity *= 1.0 - smoothstep(0.6, 1.6, aMag.y * uPpr);
+  vColor = color * intensity;
+  gl_PointSize = size;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  if (intensity < 1e-4) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  ${LOGDEPTH_VERT}
+}
+`;
+const DOT_FRAG = /* glsl */ `
+${LOGDEPTH_FRAG_PARS}
+varying vec3 vColor;
+void main() {
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float r2 = dot(p, p);
+  if (r2 > 1.0) discard;
+  gl_FragColor = vec4(vColor * (exp(-r2 * 5.0) - 0.0067), 1.0);
   ${LOGDEPTH_FRAG}
 }
 `;
@@ -69,6 +102,7 @@ export class SystemView {
   private readonly dots: THREE.Points;
   private readonly dotPos: Float32Array;
   private readonly dotCol: Float32Array;
+  private readonly dotMag: Float32Array;
   private readonly byBody = new Map<BodyData, BodyState>();
   private readonly obstacles: Obstacle[] = [];
 
@@ -83,14 +117,23 @@ export class SystemView {
     const n = Math.max(this.bodies.length, 1);
     this.dotPos = new Float32Array(n * 3);
     this.dotCol = new Float32Array(n * 3);
+    this.dotMag = new Float32Array(n * 2).fill(99);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(this.dotPos, 3));
     g.setAttribute('color', new THREE.BufferAttribute(this.dotCol, 3));
-    this.dots = new THREE.Points(g, new THREE.PointsMaterial({
-      size: 2.5, sizeAttenuation: false, vertexColors: true,
+    g.setAttribute('aMag', new THREE.BufferAttribute(this.dotMag, 2));
+    const dotMat = new THREE.ShaderMaterial({
+      vertexShader: DOT_VERT, fragmentShader: DOT_FRAG,
+      uniforms: { uPpr: { value: 1000 }, uPixelRatio: { value: 1 } },
       transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-    }));
+    });
+    this.dots = new THREE.Points(g, dotMat);
     this.dots.frustumCulled = false;
+    this.dots.onBeforeRender = (renderer, _scene, camera) => {
+      const h = renderer.getContext().drawingBufferHeight;
+      dotMat.uniforms.uPpr.value = (h * (camera as THREE.PerspectiveCamera).projectionMatrix.elements[5]) / 2;
+      dotMat.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+    };
     this.group.add(this.dots);
   }
 
@@ -187,6 +230,8 @@ export class SystemView {
       // Only bodies big enough on screen are drawn, so only they need their light worked out.
       if (s.body.radius / Math.max(s.rel.length(), 1) > 0.0006) {
         computeLight(s.light, s, this.bodies, camVec, this.star.color, star.lum, this.star.radiusKm);
+        const planet = s.body.parent ? this.byBody.get(s.body.parent) ?? s : s;
+        s.light.orbitNormal.copy(planet.orbitNormal);
       }
       s.view.update(s.rel, sunDir, simTime, realTime, forward, halfAngle, s.light);
 
@@ -208,16 +253,26 @@ export class SystemView {
       orbit.uHead.value = turn - Math.floor(turn);
       s.orbit.visible = this.showOrbits && orbit.uOpacity.value > 0.005;
 
-      // Sub-pixel bodies get a dot so planets stay visible as "wandering stars".
+      // Sub-pixel bodies are points of light, "wandering stars", as bright as they really are: sunlight
+      // at the body's distance from the star, its albedo, the lit share of the disc seen from here
+      // (Lambert sphere) and its solid angle, against the Sun from Earth (magnitude -26.74).
       const angular = s.body.radius / dist;
-      const show = angular < 0.0015 ? 1 : 0;
-      const lit = THREE.MathUtils.clamp(0.3 + angular * 500, 0.3, 1) * show;
+      const sd = Math.max(s.pos.length(), 1);
+      const phase = Math.acos(THREE.MathUtils.clamp(-s.pos.dot(s.rel) / (sd * dist), -1, 1));
+      const lambert = (Math.sin(phase) + (Math.PI - phase) * Math.cos(phase)) / Math.PI;
+      const au = sd / 1.495978707e8;
+      const flux = (star.lum / (au * au)) * albedoOf(s.body) * (2 / 3) * lambert * angular * angular;
+      const mag = flux > 0 ? -26.74 - 2.5 * Math.log10(flux) : 99;
       const c = s.body.palette[1];
+      const m = Math.max(c[0], c[1], c[2], 1e-3);
       this.dotPos.set([s.rel.x, s.rel.y, s.rel.z], i * 3);
-      this.dotCol.set([(c[0] + 0.3) * lit, (c[1] + 0.3) * lit, (c[2] + 0.3) * lit], i * 3);
+      this.dotCol.set([0.55 + 0.45 * c[0] / m, 0.55 + 0.45 * c[1] / m, 0.55 + 0.45 * c[2] / m], i * 3);
+      this.dotMag[i * 2] = mag;
+      this.dotMag[i * 2 + 1] = angular;
     }
     this.dots.geometry.attributes.position.needsUpdate = true;
     this.dots.geometry.attributes.color.needsUpdate = true;
+    this.dots.geometry.attributes.aMag.needsUpdate = true;
   }
 
   dispose(): void {

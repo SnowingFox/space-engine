@@ -130,6 +130,19 @@ const poseLL = (pose, name, lat, lon) => {
     const e = Math.abs(camGeo(name)[0] - lat) + 0.02 * Math.abs(az - pose.az);
     if (e < err) { err = e; best = az; }
   }
+  // Moving in time to the longitude shifts the latitude a little too: search again from there, finely.
+  for (let k = 0; k < 2; k++) {
+    poseAt({ ...pose, az: best }, name, lon);
+    const t = se.state().simTime;
+    let b2 = best, e2 = 1e9;
+    for (let az = best - 0.1; az < best + 0.1; az += 0.001) {
+      se.scenic({ ...pose, az, t: (pose.t ?? 0) });
+      const g = camGeo(name);
+      const e = Math.abs(g[0] - lat);
+      if (e < e2) { e2 = e; b2 = az; }
+    }
+    best = b2;
+  }
   return poseAt({ ...pose, az: best }, name, lon);
 };
 // --- Staging for lighting shots (eclipses, planetshine). Positions in km relative to the star. ---
@@ -254,5 +267,25 @@ const lookDown = (alt, pitch) => {
   const V = p.local.constructor;
   const east = new V(0, 1, 0).cross(up).normalize();
   const f = east.clone().applyAxisAngle(up.clone().cross(east).normalize(), pitch * Math.PI / 180);
+  aimAt(p.local.clone().add(f), up);
+};
+// From 'alt' km over Earth, the Sun 'above' degrees over the limb, looking towards it but 'down'
+// degrees lower (so the limb crosses the lower middle of the frame), the limb tilted by 'roll' degrees.
+const limbSun = (alt, above, down, fov = 60, roll = 0) => {
+  const st = bodyState('Earth');
+  const R = st.body.radius, r = R + alt;
+  se.hover(se.earth, alt, 0, 0, 0);
+  const E = st.pos.clone(), s = E.clone().negate().normalize();
+  const V = p.local.constructor;
+  const w = new V(0, 1, 0).cross(s).normalize();
+  const horizon = Math.asin(R / r);
+  const beta = Math.PI - horizon - (above * Math.PI) / 180;
+  const u = s.clone().multiplyScalar(Math.cos(beta)).addScaledVector(w, Math.sin(beta)).normalize();
+  p.local.copy(E).addScaledVector(u, r);
+  const toC = u.clone().negate();
+  const axis = s.clone().cross(toC).normalize();
+  const f = s.clone().applyAxisAngle(axis, (down * Math.PI) / 180);
+  se.settings.fov = fov;
+  const up = u.clone().applyAxisAngle(f, (roll * Math.PI) / 180);
   aimAt(p.local.clone().add(f), up);
 };

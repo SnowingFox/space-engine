@@ -66,6 +66,7 @@ uniform float uDisk;   // stellar disk radius as a fraction of the quad
 uniform float uStreak;
 uniform float uTime;
 uniform float uCorona; // 1 when another body exactly covers the star: its corona shows
+uniform float uAureole; // the soft glow around the core: full for a star as bright as the Sun from Earth, far less for a distant one
 varying vec2 vUv;
 
 // Smooth noise around the circle with n lobes.
@@ -105,9 +106,9 @@ void main() {
   // (A disc too small to show any surface is all glare.)
   float fade = smoothstep(1.0, 0.5, r) * mix(smoothstep(uDisk * 0.97, uDisk * 1.02, r + 0.004), 1.0, uStreak);
   vec3 tint = mix(uColor, uColor * uColor, clamp(x * 6.0, 0.0, 1.0));
-  vec3 col = mix(tint, vec3(1.0), clamp(core * 0.2, 0.0, 1.0)) * ((core + rays) * uPart.x + aureole * uPart.y) * uIntensity;
+  vec3 col = mix(tint, vec3(1.0), clamp(core * 0.2, 0.0, 1.0)) * ((core + rays) * uPart.x + aureole * uAureole * uPart.y) * uIntensity;
   vec3 corona = uColor * mix(uColor * vec3(1.0, 0.8, 0.62), vec3(1.0), clamp(coronaGlow - 0.4, 0.0, 1.0)) * coronaGlow;
-  col += (spectrum * ring * uIntensity + corona * (1.0 - uStreak)) * uPart.x;
+  col += (spectrum * ring * uIntensity * uAureole + corona * (1.0 - uStreak)) * uPart.x;
   col *= uTint * fade;
   // At totality the corona is all that is left of the star: pearly, with the pink chromosphere at the limb.
   // (It is not dimmed by the starlight tint, which the covering body has taken to zero.)
@@ -164,6 +165,8 @@ void main() {
   vKind = aGhost.w;
   // Only with the star itself in the frame.
   vInFrame = 1.0 - smoothstep(0.85, 1.0, max(abs(sun.x), abs(sun.y)));
+  // (With the star near the middle the ghosts pile up on it, where its glare drowns them anyway.)
+  if (aGhost.w < 1.5) vInFrame *= smoothstep(0.12, 0.35, length(sun));
   vec2 at = sun * aGhost.x;
   vec2 size = aGhost.w > 1.5 ? vec2(0.9, 0.006) : vec2(aGhost.y / uAspect, aGhost.y);
   // Behind the camera: nothing.
@@ -246,7 +249,7 @@ export class StarView {
         blending: THREE.AdditiveBlending,
         uniforms: {
           uColor: { value: this.color }, uTint: { value: this.tint }, uSize: { value: 1 }, uIntensity: { value: 1 },
-          uPart: { value: new THREE.Vector2(1, 1) }, uDisk: { value: 0 }, uStreak: { value: 1 }, uTime: { value: 0 }, uCorona: { value: 0 },
+          uPart: { value: new THREE.Vector2(1, 1) }, uDisk: { value: 0 }, uStreak: { value: 1 }, uTime: { value: 0 }, uCorona: { value: 0 }, uAureole: { value: 1 },
         },
       });
       const mesh = new THREE.Mesh(quad, mat);
@@ -345,7 +348,9 @@ export class StarView {
     const dAu = dist / KM_PER_AU;
     const brightness = this.brightness = this.star.lum / (dAu * dAu);
     // Glare grows with apparent brightness but never shrinks below a visible point.
-    const angular = THREE.MathUtils.clamp(0.2 * Math.pow(brightness, brightness > 1 ? 0.08 : 0.17), 0.012, 0.36);
+    // Fainter (further away) the glare shrinks towards a sharp point with fine rays: at Neptune the Sun is
+    // still dazzling (magnitude -19), but a point, not a soft disc of light.
+    const angular = THREE.MathUtils.clamp(0.2 * Math.pow(brightness, brightness > 1 ? 0.08 : 0.5), 0.004, 0.36);
     // Perspective makes the silhouette wider than the true radius once the camera is close.
     const ratio = Math.min(this.radiusKm / dist, 0.98);
     const apparent = this.radiusKm / Math.sqrt(1 - ratio * ratio);
@@ -362,6 +367,7 @@ export class StarView {
       g.uStreak.value = 1 - closeUp;
       g.uTime.value = realTime;
       g.uIntensity.value = intensity;
+      g.uAureole.value = THREE.MathUtils.clamp(Math.pow(brightness, 0.5), 0.02, 1);
     }
     (this.glareMat.uniforms.uPart.value as THREE.Vector2).set(1, 1 - over);
     (this.spillMat.uniforms.uPart.value as THREE.Vector2).set(0, over);

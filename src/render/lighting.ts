@@ -77,6 +77,8 @@ export interface BodyLight {
   readonly shine: THREE.Color;
   /** Light from the sunlit face of the body's own rings. */
   readonly ringShine: THREE.Color;
+  /** Normal of the plane the body (or its planet) orbits the star in. */
+  readonly orbitNormal: THREE.Vector3;
 }
 
 export function makeBodyLight(): BodyLight {
@@ -84,6 +86,7 @@ export function makeBodyLight(): BodyLight {
     sun: new THREE.Color(1, 1, 1), sunRadius: 0.0046,
     occ: Array.from({ length: OCCLUDERS }, () => ({ pos: new THREE.Vector3(), radius: 0, air: new THREE.Vector3(1, 1, 1) })),
     occCount: 0, shineDir: new THREE.Vector3(0, 1, 0), shine: new THREE.Color(0, 0, 0), ringShine: new THREE.Color(0, 0, 0),
+    orbitNormal: new THREE.Vector3(0, 1, 0),
   };
 }
 
@@ -183,9 +186,13 @@ export function computeLight(out: BodyLight, me: Placed, all: readonly Placed[],
     if (shine > bestShine) {
       bestShine = shine;
       out.shineDir.copy(toOther).multiplyScalar(1 / d);
-      const c = o.body.palette[1];
+      // Its light takes the colour it shows from afar: its air and clouds where it has them (Earth is
+      // blue-white), its ground otherwise.
+      const a = o.body.atmosphere;
+      const c = a ? a.color : o.body.palette[1];
       const m = Math.max(c[0], c[1], c[2], 1e-3);
-      out.shine.setRGB(0.5 + 0.5 * c[0] / m, 0.5 + 0.5 * c[1] / m, 0.5 + 0.5 * c[2] / m).multiply(starColor).multiplyScalar(perceived(shine));
+      const pale = a ? 0.75 : 0.5;
+      out.shine.setRGB(pale + (1 - pale) * c[0] / m, pale + (1 - pale) * c[1] / m, pale + (1 - pale) * c[2] / m).multiply(starColor).multiplyScalar(perceived(shine));
     }
   }
   if (!lightSwitches.shine) out.shine.setRGB(0, 0, 0);
@@ -229,7 +236,7 @@ float ringScatter(vec3 p, float d, vec3 L, vec3 camObj, float litGain) {
   float g = 0.7;
   float hg = (1.0 - g * g) / pow(1.0 + g * g + 2.0 * g * cosV, 1.5);
   float through = 0.7 * (1.0 - d) + 0.04;
-  return through + hg * 0.07 * (4.0 * d * (1.0 - d) + 0.25 * (1.0 - d));
+  return through + hg * 0.18 * (4.0 * d * (1.0 - d) + 0.35 * (1.0 - d));
 }
 `;
 

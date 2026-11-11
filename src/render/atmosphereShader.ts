@@ -31,6 +31,9 @@ uniform vec3 uColor;
 uniform float uDensity;
 uniform float uAirglow;   // night glow of the upper air: oxygen, green below and red above
 uniform float uGiant;     // 1 on gas giants: a thin layer of haze over the cloud tops
+uniform vec3 uShineDir;   // world space, towards the brightest neighbour (the Moon from Earth)
+uniform vec3 uShine;      // the light it throws here
+uniform vec3 uEcliptic;   // world space, normal of the planet's orbit
 varying vec3 vWorld;
 
 // Length of the ray's way through the shell between radii a and b.
@@ -55,6 +58,23 @@ void main() {
   vec2 ts = raySphere(ro, rd, uTop);
   vec3 ecl = eclipseLight(ro + rd * max(0.5 * (max(ts.x, 0.0) + ts.y), 0.0), uSunDir);
   vec3 col = uSunColor * ecl * atmoScatter(ro, rd, 1e9, uSunDir, uTop, uColor, uDensity, od);
+  // The night sky is never black from the ground. Moonlight is scattered like sunlight (a blue moonlit sky).
+  float night = 1.0 - smoothstep(-0.02, 0.12, dot(normalize(ro), uSunDir));
+  if (night > 0.0 && dot(uShine, vec3(1.0)) > 1e-5) {
+    vec3 od2;
+    col += uShine * night * atmoScatterSteps(ro, rd, 1e9, uShineDir, uTop, uColor, uDensity, 6, false, od2);
+  }
+  if (uAirglow > 0.0 && night > 0.0) {
+    // Skyglow: airglow's continuum and the light of the whole starry sky, scattered by the air; it grows
+    // with the length of the way through the air, so the sky goes dark blue-grey towards the horizon.
+    vec3 skyglow = vec3(0.10, 0.13, 0.20) * 0.004 * (1.0 - exp(-0.6 * (od.r + od.g + od.b)));
+    // Zodiacal light: sunlight scattered by dust in the plane of the planets, a faint cone rising from
+    // where the Sun has set, along the ecliptic.
+    float off = abs(dot(rd, uEcliptic));
+    float elong = acos(clamp(dot(rd, uSunDir), -1.0, 1.0));
+    float zodi = exp(-off * off * 18.0) * exp(-elong * 1.6) * smoothstep(0.25, 0.6, elong);
+    col += (skyglow + vec3(1.0, 0.92, 0.8) * 0.0035 * zodi * exp(-od)) * night * uAirglow;
+  }
   if (uAirglow > 0.0) {
     // Oxygen's green line from a layer near 95 km, and fainter red higher up. Each layer is three nested
     // shells, so its edges are soft: from the ground it is only a faint brightening low over the horizon
@@ -63,7 +83,7 @@ void main() {
     float green = 0.5 * shellPath(ro, rd, 1.0 + d * 1.12, 1.0 + d * 1.2)
       + 0.3 * shellPath(ro, rd, 1.0 + d * 1.06, 1.0 + d * 1.26) + 0.2 * shellPath(ro, rd, 1.0 + d * 1.0, 1.0 + d * 1.34);
     float red = 0.6 * shellPath(ro, rd, 1.0 + d * 1.35, 1.0 + d * 1.55) + 0.4 * shellPath(ro, rd, 1.0 + d * 1.25, 1.0 + d * 1.7);
-    col += (vec3(0.35, 1.0, 0.45) * green + vec3(1.0, 0.25, 0.15) * (0.15 * red)) * (uAirglow * 0.22) * exp(-od);
+    col += (vec3(0.35, 1.0, 0.45) * green + vec3(1.0, 0.25, 0.15) * (0.15 * red)) * (uAirglow * 0.12) * exp(-od);
   }
   if (uGiant > 0.0) {
     // Backlit, the haze over a giant's cloud tops scatters sunlight forward into a thin bright rim
