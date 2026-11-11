@@ -465,6 +465,16 @@ uniform sampler2D uCloudTint; // colour of an opaque cloud deck (Venus)
 uniform vec4 uMapInfo;        // colour map on, night map on, colour texels around the equator, cloud tint on
 uniform vec3 uMapTint;        // gain (and hue, for greyscale mosaics) applied to the colour map
 
+// 'sharp' < 1 picks a finer mip than the footprint asks for (a cloud map's soft edges stay crisp at grazing angles).
+vec4 sampleEquirectBias(sampler2D map, vec3 n, float sharp) {
+  vec2 uv = equirect(n);
+  vec2 alt = vec2(fract(uv.x + 0.5) - 0.5, uv.y);
+  vec2 dx = dFdx(uv), dy = dFdy(uv);
+  vec2 dxa = dFdx(alt), dya = dFdy(alt);
+  if (abs(dxa.x) + abs(dya.x) < abs(dx.x) + abs(dy.x)) { dx = dxa; dy = dya; }
+  return textureGrad(map, uv, dx * sharp, dy * sharp);
+}
+
 vec4 sampleEquirect(sampler2D map, vec3 n) {
   vec2 uv = equirect(n);
   // Take derivatives from whichever parameterisation is continuous here, so the seam does not shimmer.
@@ -483,7 +493,7 @@ vec3 cloudFrame(vec3 n) {
 float cloudAt(vec3 n, float detail) {
   if (uClouds <= 0.0) return 0.0;
   vec3 q = cloudFrame(n);
-  float c = sampleEquirect(uCloudMap, q).r;
+  float c = sampleEquirectBias(uCloudMap, q, 0.6).r;
   float edge = 4.0 * c * (1.0 - c);
   if (detail > 700.0 && edge > 0.01) {
     c = clamp(c + edge * 0.9 * (fbm(q * 600.0 + 3.0, min(detail / 600.0, 40.0)) - 0.5), 0.0, 1.0);
