@@ -7,5 +7,3 @@ assets-src
 shots
 # Scratch debugging scripts
 scripts/_*.mjs
-# Your own soundtrack, played locally; never committed (see the help panel)
-public/music/

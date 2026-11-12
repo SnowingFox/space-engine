@@ -1,8 +1,8 @@
 /**
  * Background music from a file the player supplies: picked in Settings or dropped on the
- * window, kept in IndexedDB across reloads. Without one, public/music/soundtrack.mp3 is used
- * if it exists locally (that folder is gitignored). Nothing plays until the first click or
- * key press, as browsers require; playback loops and fades in and out.
+ * window, kept in IndexedDB across reloads. Without one, the soundtrack the project ships at
+ * public/music/soundtrack.mp3 is used. Nothing plays until the first click or key press, as
+ * browsers require; playback loops and fades in and out.
  */
 
 const DEFAULT_URL = `${import.meta.env.BASE_URL}music/soundtrack.mp3`;

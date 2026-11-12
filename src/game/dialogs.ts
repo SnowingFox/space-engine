@@ -283,7 +283,7 @@ export class SettingsDialog {
     this.vol.addEventListener('input', () => { music.setVolume(Number(this.vol.value)); this.volOut.textContent = `${Math.round(music.volume * 100)}%`; });
     this.vol.addEventListener('change', () => this.vol.blur());
     el('div', 'note', body, 'Choose an audio file or drop one on the window; it is kept in this browser. '
-      + 'Or put your own soundtrack at <code>public/music/soundtrack.mp3</code> (not committed).');
+      + 'Leave it empty to use the built-in soundtrack (<code>public/music/soundtrack.mp3</code>).');
     this.sync();
   }
 
@@ -389,6 +389,6 @@ export const HELP_HTML = `${titleBar('Controls')}
     ])}
   </div>
 </div>
-<p class="note">Music: choose an audio file in Settings (F4) or drop one on the window, or put your own soundtrack at
-  <code>public/music/soundtrack.mp3</code> (that folder is not committed).</p>
+<p class="note">Music: the built-in soundtrack plays in a loop; choose another audio file in Settings (F4) or drop
+  one on the window.</p>
 ${CREDITS_HTML}`;
