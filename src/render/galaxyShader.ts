@@ -48,7 +48,7 @@ export const galaxyKnotUniforms: Record<string, THREE.IUniform> = (() => {
 //        (one side's arms stronger), elongation of the disc along the bar (1: round)
 //   gF = a ring: radius (fraction of the radius), brightness (above 1 the disc inside and beyond is cleared),
 //        spokes (negative: a polar ring), dust ring
-//   gG = tidal tails, shells, a starburst's outflow
+//   gG = tidal tails, shells, a starburst's outflow, warp of the disc
 export const GALAXY_GLSL = /* glsl */ `
 ${NOISE}
 uniform highp sampler3D uNoise;
@@ -201,16 +201,18 @@ float gPick(float ya, float yb, float h, float u) {
   return clamp((ya - y) / dy, 0.0, 1.0);
 }
 
-// The shells of an elliptical that swallowed a smaller galaxy: thin sharp-edged arcs at radii growing by a factor
-// of 1.6, on alternate sides along its long axis. Returns what the bulge's light at a point is multiplied by.
+// The shells of an elliptical that swallowed a smaller galaxy: a few thin, sharp-edged concentric shells at radii
+// growing by a factor of 1.5 from 2.5 bulge scales out, brighter on alternate sides along its long axis, and
+// falling off far slower than the elliptical's own light (they are the other galaxy's stars). Returns the light
+// they add, in the bulge's units.
 float gShell(vec3 p, vec4 gA, float amount) {
   float r = length(p);
-  float lr = log(max(r, 1.0) / (2.0 * gA.w)) / log(1.6);
-  if (lr < 0.0) return 1.0;
+  float lr = log(max(r, 1.0) / (2.5 * gA.w)) / log(1.5);
+  if (lr < 0.0 || lr > 5.0) return 0.0;
   float k = floor(lr), f = lr - k;
-  float edge = smoothstep(0.7, 0.96, f) * (1.0 - smoothstep(0.96, 1.0, f));
-  float side = smoothstep(-0.2, 0.4, (mod(k, 2.0) < 0.5 ? p.x : -p.x) / r);
-  return 1.0 + amount * 6.0 * edge * side;
+  float edge = smoothstep(0.55, 0.95, f) * (1.0 - smoothstep(0.95, 1.0, f));
+  float side = 0.35 + 0.65 * smoothstep(-0.3, 0.5, (mod(k, 2.0) < 0.5 ? p.x : -p.x) / r);
+  return amount * 0.3 * edge * side * exp(-r / (3.0 * gA.w));
 }
 
 // ro, rd: ray in the galaxy's frame; pixel: radians across one pixel, which limits the cloud detail.
@@ -271,7 +273,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
     turn = vec2(cos(uShift[k].z), sin(uShift[k].z));
   }
   float fa = gBulge(bro + rd * t0, gA, gD, turn);
-  if (gG.y > 0.0) fa *= gShell(ro + rd * t0, gA, gG.y);
+  if (gG.y > 0.0) fa += gShell(ro + rd * t0, gA, gG.y);
   float n = float(steps);
   for (int i = 0; i < steps; i++) {
     float tb = t0 + span * (exp(a * float(i + 1) / n) - 1.0) * norm;
@@ -289,7 +291,7 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
     float reachD = cross ? min(ds, hd / max(abs(rd.y), 1e-3)) : ds;
     // The bulge is smooth: three samples a step integrate it without grain or bands.
     float fm = gBulge(bro + rd * (ta + 0.5 * ds), gA, gD, turn), fb = gBulge(bro + rd * tb, gA, gD, turn);
-    if (gG.y > 0.0) { fm *= gShell(ro + rd * (ta + 0.5 * ds), gA, gG.y); fb *= gShell(ro + rd * tb, gA, gG.y); }
+    if (gG.y > 0.0) { fm += gShell(ro + rd * (ta + 0.5 * ds), gA, gG.y); fb += gShell(ro + rd * tb, gA, gG.y); }
     float bulge = ds * (fa + 4.0 * fm + fb) / 6.0;
     fa = fb;
     ta = tb;
@@ -300,6 +302,9 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
     vec3 e = vec3(0.0), born = vec3(0.0);
     float tau = 0.0;
     if (gC.y > 0.0) {
+      // A warped disc (Centaurus A's): its plane tilts more the further out, up on one side, down on the other.
+      float yw = gG.w > 0.0 ? gG.w * gA.x * pow(r / gA.x, 2.0) * sin(atan(p.z, p.x)) : 0.0;
+      ya -= yw; yb -= yw;
       float theta = polar.y;
       float minorW = 1.0 - 0.8 * gE.x;
       float arm = gArmStructure(gArm(theta, r, gA, gB, minorW), p, theta, r, gA, gB, gC, gE);
@@ -329,18 +334,26 @@ vec4 galaxyMarch(vec3 ro, vec3 rd, vec4 gA, vec4 gB, vec4 gC, vec4 gD, vec4 gE, 
         float clear = clamp(gF.y - 1.0, 0.0, 1.0);
         lit *= 1.0 - 0.92 * clear * (smoothstep(0.18 * rr, 0.4 * rr, r) * smoothstep(0.95 * rr, 0.8 * rr, r) + smoothstep(1.1 * rr, 1.35 * rr, r));
         // Spokes from the core to the ring (the Cartwheel's).
-        float spokes = gF.z > 0.0 ? pow(0.5 + 0.5 * cos(gF.z * polar.y + gC.w), 10.0) * smoothstep(0.15 * rr, 0.35 * rr, r) * smoothstep(rr, 0.8 * rr, r) : 0.0;
-        ringLight = discLum * exp(-rr / gA.y) * gF.y * shape * far;
-        e += oldTint * (stars * discLum * exp(-r / gA.y) * spokes * 0.6 * clear * far);
+        // (Straight and radial: the angle without the arms' wobble.)
+        float spokes = gF.z > 0.0 ? pow(max(0.5 + 0.5 * cos(gF.z * atan(p.z, p.x) + gC.w), 0.0), 10.0) * smoothstep(0.15 * rr, 0.35 * rr, r) * smoothstep(rr, 0.8 * rr, r) : 0.0;
+        // (As bright against its galaxy however short the disc's scale: at most two scale lengths' fall.)
+        ringLight = discLum * exp(-min(rr / gA.y, 2.0)) * gF.y * shape * far;
+        e += oldTint * (stars * discLum * exp(-min(r / gA.y, 2.0)) * spokes * 0.6 * clear * far);
       }
-      // Tidal tails: two long, thin, open arcs flung out from the disc, beyond its edge.
+      // Tidal tails: two long arcs flung out from the disc, curving away, thinning and fading outward, with clumps of
+      // stars along them; tilted out of the plane further out. (The angle without the disc's wobble or flocculence.)
       if (gG.x > 0.0) {
-        float tp = 2.0 * (polar.y - 0.5 * log(max(r, 1.0) / (gA.x * 0.25)));
-        float tail = pow(0.5 + 0.5 * cos(tp), 14.0) * smoothstep(0.25 * gA.x, 0.45 * gA.x, r) * exp(-r / (0.35 * gA.x)) * smoothstep(gA.x * 1.15, gA.x * 0.9, r);
-        e += oldTint * (gG.x * discLum * 0.5 * tail * (0.6 + 0.8 * clouds) * gColumn(ya, yb, gA.z * 2.5, ds) * far);
+        float th0 = atan(p.z, p.x);
+        float tp = 2.0 * (th0 - 0.85 * log(max(r, 1.0) / (gA.x * 0.12)));
+        float width = 6.0 + 40.0 * r / gA.x;
+        float tail = pow(max(0.5 + 0.5 * cos(tp), 0.0), width) * smoothstep(0.1 * gA.x, 0.25 * gA.x, r) * exp(-r / (0.45 * gA.x)) * smoothstep(gA.x * 1.15, gA.x * 0.85, r);
+        float clumps = 0.35 + 1.6 * pow(max(gnoise(p / (gA.x * 0.02) + gC.w + 9.0), 0.0), 2.0);
+        float tiltY = 0.25 * r * sin(th0 + gC.w);
+        e += oldTint * (gG.x * discLum * 0.9 * tail * clumps * gColumn(ya - tiltY, yb - tiltY, gA.z * 2.0, ds) * far);
+        born += vec3(0.55, 0.72, 1.05) * (gG.x * discLum * 0.5 * tail * smoothstep(0.75, 1.0, clumps / 1.95) * gColumn(ya - tiltY, yb - tiltY, gA.z * 1.2, ds) * far);
       }
       e += oldTint * (stars * (1.0 - blue) * lit);
-      born = vec3(0.52, 0.72, 1.1) * (newborn * blue * lit + newborn * ringLight);
+      born += vec3(0.52, 0.72, 1.1) * (newborn * blue * lit + newborn * ringLight);
       if (off < 2.5 * gA.z && gB.w > 0.0) {
       // Detail finer than the step, or than a pixel, would only be grain.
       float grain = min(knot / (2.0 * pixel * tb), 2.5 * knot / reachD * stepLimit);

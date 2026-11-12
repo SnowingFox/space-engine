@@ -63,6 +63,8 @@ export interface GalaxyData {
   tails?: number;
   shells?: number;
   outflow?: number;
+  /** How far its disc is warped: the plane's height at the edge, in radii, up on one side and down on the other. */
+  warp?: number;
   /** What it is, in words, where its kind says too little (a ring galaxy, a polar ring, a dwarf spheroidal...). */
   type?: string;
 }
@@ -285,7 +287,7 @@ function build(): GalaxyData[] {
   // (Its disc seen some 15 deg from edge-on, the lane across the middle as in the photographs.)
   randomAxes(rng);
   add('Centaurus A', 'lenticular', fromSky(309.5, 19.4, 12.4e6), 48000, facing(309.5, 19.4, 75, 2.0), {
-    dust: 5, bulgeLum: 1.8 / 4800, bulgeScale: 4800, bulgeFlat: 1.1, discLum: 0.35e-4, discScale: 6000, ring: [0.22, 0, 0, 2.5], type: 'Elliptical galaxy with a dust lane',
+    dust: 5, bulgeLum: 1.8 / 4800, bulgeScale: 4800, bulgeFlat: 1.1, discLum: 0.35e-4, discScale: 6000, ring: [0.22, 0, 0, 2.5], warp: 1.2, blue: 0.7, type: 'Elliptical galaxy with a dust lane',
   });
   add('Southern Pinwheel (M83)', 'barred spiral', fromSky(314.6, 32, 15e6), 27500, undefined, { arms: 2, armContrast: 1, blue: 1 });
   add('Pinwheel (M101)', 'spiral', fromSky(102, 59.8, 21e6), 85000, undefined, {

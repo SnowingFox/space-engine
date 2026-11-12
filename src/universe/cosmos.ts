@@ -309,7 +309,11 @@ function morphology(g: GalaxyData, st: Structure, rng: Rng, x: number): void {
     else if (u < 0.55) { g.armContrast = 0.45; g.flocculent = 0.9; g.type = 'Flocculent spiral galaxy'; }
     if (st.env !== 'filament' && v < 0.02) {
       // Collisional ring: a smaller galaxy fell through it.
-      g.armContrast = 0; g.flocculent = 0; g.ring = [0.7 + 0.15 * rng.next(), 2.6, 6 + Math.floor(rng.next() * 8), 0.3];
+      g.armContrast = 0; g.flocculent = 0; g.ring = [0.7 + 0.15 * rng.next(), 3, 6 + Math.floor(rng.next() * 8), 0.3];
+      // (The ring's light spread out with the wave: a longer disc scale, its light kept.)
+      const k = lightOf(g);
+      g.discScale = 0.35 * g.radius;
+      g.discLum *= k / lightOf(g);
       g.type = 'Ring galaxy (collisional)';
     }
   } else if (g.kind === 'barred spiral') {
@@ -317,7 +321,12 @@ function morphology(g: GalaxyData, st: Structure, rng: Rng, x: number): void {
   } else if (g.kind === 'lenticular') {
     if (u < 0.3) { g.dust = 0.8 + 0.8 * v; g.type = 'Lenticular galaxy with a dust lane'; }
     else if (u < 0.33) { g.ring = [0.55 + 0.2 * v, 1.4, -1, 0.8]; g.type = 'Polar-ring galaxy'; }
-    else if (u < 0.34) { g.ring = [0.7, 2.4, 0, 0]; g.bulgeFlat = 1.05; g.blue = 1; g.type = 'Ring galaxy (Hoag-type)'; }
+    else if (u < 0.34) {
+      g.ring = [0.72, 2.4, 0, 0]; g.bulgeFlat = 1.05; g.blue = 1; g.type = 'Ring galaxy (Hoag-type)';
+      const k = lightOf(g);
+      g.discScale = 0.45 * g.radius;
+      g.discLum *= k / lightOf(g);
+    }
   }
 }
 

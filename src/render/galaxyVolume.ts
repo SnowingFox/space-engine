@@ -17,7 +17,7 @@ export function galaxyParams(g: GalaxyData, brightness: number): [number[], numb
     [g.bulgeFlat, g.irregular, brightness, g.bar ?? (g.kind === 'barred spiral' ? 1.8 : 1)],
     [st.flocculent, st.spurs, st.lopsided, st.elongation],
     g.ring ?? [0, 0, 0, 0],
-    [g.tails ?? 0, g.shells ?? 0, g.outflow ?? 0, 0],
+    [g.tails ?? 0, g.shells ?? 0, g.outflow ?? 0, g.warp ?? 0],
   ];
 }
 
