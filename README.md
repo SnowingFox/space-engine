@@ -82,7 +82,42 @@ public/textures/   处理好的贴图（已提交，可直接使用）及来源�
 scripts/           截图与性能、运动测量工具（puppeteer），textures/ 下是贴图转换脚本
 ```
 
-`assets-src/`（约 2.8 GB 的原始下载）不在仓库里。运行游戏只需要 `public/textures/` 里已经处理好的贴图。只有想重新生成贴图时才需要它：按 `public/textures/CREDITS.md` 里列的来源下载到 `assets-src/raw/`，再运行 `scripts/textures/build.sh`，这一步需要一个装了 numpy 和 Pillow 的 Python 虚拟环境 `.texvenv`。
+### 原始素材 `assets-src/`（Git LFS）
+
+运行游戏只需要 `public/textures/` 里已经处理好的贴图，它们是普通文件，clone 下来就有。`assets-src/` 里是生成这些贴图用的原始下载，只有想重新生成贴图时才用得到。它通过 [Git LFS](https://git-lfs.com) 存放，而且**默认不下载**：仓库根目录的 `.lfsconfig` 排除了它，免得每次 clone 都消耗 LFS 流量。
+
+需要时再下载：
+
+```sh
+git lfs install
+git lfs pull --include="assets-src/**" --exclude=""
+```
+
+GitHub 免费的 LFS 空间只有 1 GB，所以仓库里只放了**地球**的全套原始数据（约 920 MB）：
+
+| 文件 | 内容 | 来源 |
+|---|---|---|
+| `raw/sss/8k_earth_daymap.jpg`、`8k_earth_clouds.jpg`、`8k_earth_nightmap.jpg` | 地表颜色、云图、夜间灯光（8k） | Solar System Scope, CC BY 4.0 |
+| `raw/nasa/BlackMarble_2016_3km.jpg` | 夜间灯光 | NASA Earth Observatory，公有领域 |
+| `raw/nasa/PIA11707_orig.jpg` | NASA 原图 | NASA，公有领域 |
+| `raw/etopo/etopo2022_60s_band*.nc` | 全球地形与海底高程（1 弧分，21600×10800） | NOAA ETOPO 2022，公有领域 |
+| `previews/` | 处理过程中的对比预览图 | 由上述素材生成 |
+
+其余原始素材**没有放进仓库**，`public/textures/` 里已经有它们处理好的版本，游戏照常使用。想重新生成的话，从官方地址下载到对应目录就行。每个文件的确切地址、署名和改动都在 [`public/textures/CREDITS.md`](public/textures/CREDITS.md) 里：
+
+| 目录 | 内容 | 来源 |
+|---|---|---|
+| `raw/sss/` 其他文件 | 火星、水星、金星、木星、土星（含土星环）、天王星、海王星的贴图 | <https://www.solarsystemscope.com/textures/> |
+| `raw/svs/` | 月球颜色与 LOLA 高程，以及 Milky Way 巡天图（EXR） | NASA SVS 4720 和 4851 |
+| `raw/pds/` | 火星 MOLA 高程 | NASA PDS Geosciences |
+| `raw/usgs/` | 木卫一到木卫四、土卫二、土卫六、海卫一、冥王星的全球拼图（约 1.3 GB） | USGS Astrogeology |
+| `raw/galaxies/` | 星系照片 | ESA/Hubble、ESO，CC BY 4.0 |
+
+星系、星云、星空本身都是程序生成的，不依赖这些照片；照片只用于对比，以及设置里可选的 "Milky Way photo" 显示。下载好之后运行 `scripts/textures/build.sh` 重新生成 `public/textures/`。这一步需要一个装了 numpy 和 Pillow 的 Python 虚拟环境 `.texvenv`：
+
+```sh
+python3 -m venv .texvenv && .texvenv/bin/pip install numpy pillow imagecodecs netCDF4
+```
 
 ## 测试
 
