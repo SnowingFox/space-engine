@@ -1,0 +1,4 @@
+[lfs]
+	# The raw sources are only needed to rebuild public/textures/: a clone skips them
+	# (and the LFS bandwidth they would cost) unless asked for, see the README.
+	fetchexclude = assets-src/**
