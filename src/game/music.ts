@@ -9,6 +9,8 @@ const DEFAULT_URL = `${import.meta.env.BASE_URL}music/soundtrack.mp3`;
 const PREFS_KEY = 'se.music';
 const DB_NAME = 'space-engine';
 const STORE = 'music';
+/** Session storage key: playback position across reloads. */
+const POS_KEY = 'se.music.pos';
 const TRACK_KEY = 'track';
 const FADE_S = 1.2;
 /** Gain while the autopilot jumps, relative to the volume setting. */
@@ -55,6 +57,9 @@ export class MusicPlayer {
   private gain: GainNode | null = null;
   private url: string | null = null;
   private unlocked = false;
+  private autoplayRefused = false;
+  /** Where the track was when the page was last left (s). */
+  private resumeAt = 0;
   private ducked = false;
   private pauseTimer = 0;
 
@@ -75,6 +80,11 @@ export class MusicPlayer {
     };
     window.addEventListener('pointerdown', unlock, true);
     window.addEventListener('keydown', unlock, true);
+    // A reload (a code change during development, or F5) starts again where the track was.
+    try { this.resumeAt = Number(sessionStorage.getItem(POS_KEY) ?? 0) || 0; } catch { /* no session storage */ }
+    window.addEventListener('pagehide', () => {
+      try { sessionStorage.setItem(POS_KEY, String(this.audio.currentTime || 0)); } catch { /* not remembered */ }
+    });
 
     // Drop an audio file anywhere on the window to use it as the soundtrack.
     window.addEventListener('dragover', (e) => {
@@ -171,7 +181,9 @@ export class MusicPlayer {
   /** Start or stop to match the preference, the track and the autoplay unlock. */
   private update(): void {
     this.onChange();
-    const want = this.on && !!this.track && this.unlocked;
+    // Before any click or key, try anyway: browsers allow it on a page the player has used before. If
+    // that's refused, say how to start it and wait for the first click or key.
+    const want = this.on && !!this.track && (this.unlocked || !this.autoplayRefused);
     if (want) this.start();
     else this.fadeOut();
   }
@@ -191,7 +203,26 @@ export class MusicPlayer {
     }
     void this.ctx?.resume();
     if (this.audio.paused) {
-      this.audio.play().then(() => this.onChange(), () => this.notify('Could not play the music file'));
+      if (this.resumeAt > 0 && this.audio.currentTime === 0) {
+        try { this.audio.currentTime = this.resumeAt; } catch { /* not seekable yet */ }
+        this.resumeAt = 0;
+      }
+      this.audio.play().then(() => {
+        // (Playing into an audio context the browser keeps suspended is still silence.)
+        if (!this.ctx || this.ctx.state === 'running') this.unlocked = true;
+        else if (!this.unlocked && !this.autoplayRefused) {
+          this.autoplayRefused = true;
+          this.notify('Click or press any key to start the music (M turns it off)');
+        }
+        this.onChange();
+      }, (e: unknown) => {
+        if (!this.unlocked && e instanceof DOMException && e.name === 'NotAllowedError') {
+          this.autoplayRefused = true;
+          this.notify('Click or press any key to start the music (M turns it off)');
+        } else {
+          this.notify('Could not play the music file');
+        }
+      });
     }
     this.ramp(FADE_S);
   }
