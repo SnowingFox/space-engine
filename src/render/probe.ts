@@ -42,6 +42,44 @@ export function bake(material: THREE.ShaderMaterial, into: THREE.WebGLRenderTarg
   return true;
 }
 
+const decode = (p: Uint8Array): number => p[0] / 255 + p[1] / 65025 + p[2] / 16581375;
+
+/**
+ * The same probe without waiting for it: a synchronous read stalls the CPU until the GPU has
+ * finished everything queued before it (the whole previous frame), every frame. This one is read
+ * back once the GPU gets there, a frame or so later. One read at a time.
+ */
+export class AsyncProbe {
+  private readonly target = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false });
+  private readonly pixel = new Uint8Array(4);
+  private pending = false;
+
+  /** A read is on its way. */
+  get busy(): boolean {
+    return this.pending;
+  }
+
+  /** Starts a read unless one is already on its way; done gets the decoded value. */
+  start(material: THREE.ShaderMaterial, done: (v: number) => void): boolean {
+    if (!renderer || this.pending) return false;
+    quad.material = material;
+    const previous = renderer.getRenderTarget();
+    renderer.setRenderTarget(this.target);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(previous);
+    this.pending = true;
+    renderer.readRenderTargetPixelsAsync(this.target, 0, 0, 1, 1, this.pixel).then(() => {
+      this.pending = false;
+      done(decode(this.pixel));
+    }, () => { this.pending = false; });
+    return true;
+  }
+
+  dispose(): void {
+    this.target.dispose();
+  }
+}
+
 /** Runs the material over a single pixel and decodes its packed 0..1 output; null before initProbe. */
 export function probe(material: THREE.ShaderMaterial): number | null {
   if (!renderer) return null;
@@ -51,5 +89,5 @@ export function probe(material: THREE.ShaderMaterial): number | null {
   renderer.render(scene, camera);
   renderer.readRenderTargetPixels(target, 0, 0, 1, 1, pixel);
   renderer.setRenderTarget(previous);
-  return pixel[0] / 255 + pixel[1] / 65025 + pixel[2] / 16581375;
+  return decode(pixel);
 }

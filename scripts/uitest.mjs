@@ -170,13 +170,40 @@ await press('KeyO');
 check('O toggles orbits', (await ev('se.settings.orbits')) === false && (await ev('se.getView().showOrbits')) === false);
 await press('KeyO');
 await press('KeyL', true);
-check('Shift+L toggles labels, not time', (await ev('se.settings.labels')) === false && (await state()).timeRate === 1);
+// (Labels are off by default.)
+check('Shift+L toggles labels, not time', (await ev('se.settings.labels')) === true && (await state()).timeRate === 1);
 await press('KeyL', true);
 await press('Backquote');
 check('` hides the interface', await ev(`getComputedStyle(document.getElementById('hud')).display === 'none' && getComputedStyle(document.getElementById('labels')).display === 'none'`));
 await press('Backquote');
 await press('KeyH');
 check('H = go home', (await state()).mode === 'Go to: Earth' || (await state()).selected === 'Earth', (await state()).mode);
+
+// --- Object panel, context menu, music.
+await press('KeyZ');
+await ev('se.placeAt(se.earth); se.select(se.earth)');
+await sleep(300);
+const infoRows = () => ev(`document.querySelectorAll('#hud .info .kv .k').length`);
+const compact = await infoRows();
+check('the object panel is compact by default', compact <= 4 && (await ev(`document.querySelector('#hud .info').getBoundingClientRect().height < innerHeight * 0.25`)), `${compact} rows`);
+await press('KeyI');
+check('I shows the full property list', (await infoRows()) > 8);
+await press('KeyI');
+check('I again goes back to the summary', (await infoRows()) === compact);
+await page.mouse.click(720, 450, { button: 'right' });
+await sleep(150);
+check('right-click on an object opens its menu', await ev(`!document.querySelector('#hud .ctx').classList.contains('hidden') && document.querySelector('#hud .ctx .hd').textContent === 'Earth'`));
+await press('Escape');
+check('Esc closes the menu, keeps the selection', await ev(`document.querySelector('#hud .ctx').classList.contains('hidden')`) && (await state()).selected === 'Earth');
+await page.mouse.click(720, 450, { button: 'right' });
+await sleep(150);
+await page.click('#hud .ctx .item:nth-child(3)');
+check('menu Go to flies there', (await state()).mode.endsWith(': Earth'), (await state()).mode);
+await press('KeyZ');
+const musicOn = await ev('se.hud.music.on');
+await press('KeyM');
+check('M toggles music', (await ev('se.hud.music.on')) === !musicOn);
+await press('KeyM');
 
 // --- Scenic spots: the panel, exact and repeatable poses, free flight afterwards.
 await press('KeyZ');
@@ -211,6 +238,21 @@ await page.keyboard.up('KeyW');
 const after = await ev('se.player.local.toArray()');
 check('free flight after a jump', Math.hypot(after[0] - before[0], after[1] - before[1], after[2] - before[2]) > 100 && (await state()).mode === 'Free mode');
 check('unknown spot ids are refused', (await ev(`se.scenic('nowhere')`)) === false);
+
+// --- Black holes: Go to parks at a safe distance, the lens draws it, and flying at it stops short of the horizon.
+await ev(`se.go(se.blackHole('Cygnus X-1'))`);
+// (Some 7,000 light years: the autopilot takes 15 s or so; wait for it to arrive.)
+for (let i = 0; i < 60 && (await state()).mode !== 'Free mode'; i++) await sleep(500);
+await sleep(500);
+const bh = await ev(`(() => { const t = se.blackHole('Cygnus X-1'); const d = se.targetPos(t).distanceTo(se.player.local) / t.bh.rs;
+  return { d, mode: se.state().mode, lens: se.pipeline.lens.enabled, near: se.holes.near && se.holes.near.bh.name }; })()`);
+check('G parks 40 Schwarzschild radii from Cygnus X-1', Math.abs(bh.d - 40) < 2 && bh.mode === 'Free mode' && bh.near === 'Cygnus X-1', JSON.stringify(bh));
+check('the lens pass runs with the hole in view', bh.lens);
+await page.keyboard.down('KeyW');
+await sleep(4000);
+await page.keyboard.up('KeyW');
+const closest = await ev(`(() => { const t = se.blackHole('Cygnus X-1'); return se.targetPos(t).distanceTo(se.player.local) / t.bh.rs; })()`);
+check('flying at a black hole stops outside 3 r_s', closest >= 2.99 && closest < 40, `${closest.toFixed(2)} r_s`);
 
 check('no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');

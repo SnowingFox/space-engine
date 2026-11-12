@@ -18,6 +18,10 @@ export interface StarData {
   kind: 'main' | 'giant' | 'supergiant' | 'dwarf';
   level: number;
   isSol?: boolean;
+  /** A place, not a star: the centre of a galaxy, used to aim and fly at it. Never has planets. */
+  virtual?: boolean;
+  /** A black hole's companion (see blackHoles.ts): its system has no planets. */
+  noPlanets?: boolean;
 }
 
 export const SOL_ID = 0x50150150;

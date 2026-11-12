@@ -23,6 +23,8 @@ export const MAX_SPEED = 1e7 * KM_PER_LY; // km/s — 10 Mly/s, intergalactic
 export const SPEED_STEP = 1.3;
 /** Seconds for the actual velocity to settle on the setting (exponential time constant). */
 const INERTIA = 0.11;
+/** Seconds for the proximity speed cap to rise e-fold as the camera leaves a body. */
+const RAMP = 0.45;
 const LOOK_RAD_PER_PX = 0.0022;
 const ORBIT_RAD_PER_PX = 0.005;
 
@@ -64,6 +66,15 @@ export class Player {
   speedSetting = 3000;
   /** True while the proximity safety limit is holding the speed below the setting. */
   limited = false;
+  /** The fastest the proximity limit allows here, km/s (Infinity far from everything). */
+  cap = Infinity;
+  /**
+   * The cap as it eases up: leaving a planet, the proximity limit rises with the fourth power of the
+   * altitude, so obeying it at once would take the camera from a fraction of c to light years a second
+   * within a few frames (it reads as a jump). It may fall at once, but rises at most e-fold every RAMP s.
+   */
+  private easedCap = Infinity;
+  private lastLocal = new THREE.Vector3(NaN, 0, 0);
   /** C / T: turn the camera towards a target; with 'hold' keep it centred. */
   aim: { target: Target; hold: boolean } | null = null;
   /** Called when the autopilot reaches its destination. */
@@ -133,6 +144,11 @@ export class Player {
     if (thrust.lengthSq() > 0) this.autopilot = null;
 
     this.limited = false;
+    const limitHere = this.speedLimit(obstacles);
+    // After a jump (a scenic spot, a reload, the autopilot) there's nothing to ease from.
+    const jumped = !(before.distanceTo(this.lastLocal) <= Math.max(Math.min(this.easedCap, limitHere), this.speed, 1) * Math.max(dt, 1 / 30) * 4);
+    this.easedCap = this.autopilot || jumped ? limitHere : Math.min(limitHere, this.easedCap * Math.exp(dt / RAMP));
+    this.cap = this.easedCap;
     if (this.autopilot) {
       this.flyAutopilot(dt, simTime, obstacles);
     } else {
@@ -141,7 +157,7 @@ export class Player {
       // Released keys mean a clean stop, not an endless exponential tail.
       if (thrust.lengthSq() === 0 && this.velocity.length() < this.speedSetting * 0.01) this.velocity.set(0, 0, 0);
       // Slow down near surfaces so a planet can be approached at any speed setting.
-      const limit = this.speedLimit(obstacles);
+      const limit = this.cap;
       if (this.velocity.length() > limit) {
         this.velocity.setLength(limit);
         this.limited = true;
@@ -151,6 +167,7 @@ export class Player {
 
     this.collide(obstacles);
     this.speed = dt > 0 ? before.distanceTo(this.local) / dt : 0;
+    this.lastLocal.copy(this.local);
   }
 
   private rotate(dt: number, input: Input, simTime: number, ctx: ViewContext): void {
@@ -225,6 +242,38 @@ export class Player {
     }
     const end = parkingDistance(ap.target);
 
+    if (ap.target.kind === 'galaxy') {
+      // Arrive above the disc at an angle, so a spiral shows its arms rather than its edge.
+      const a = ap.target.galaxy.axes;
+      const normal = q1Vec.set(a[3], a[4], a[5]);
+      const side = sideVec.copy(offset).addScaledVector(normal, -offset.dot(normal));
+      if (side.lengthSq() < 1e-6) side.set(a[0], a[1], a[2]);
+      side.normalize();
+      const pref = normal.multiplyScalar(Math.sign(offset.dot(normal)) || 1).multiplyScalar(0.8).addScaledVector(side, 0.6).normalize();
+      // Turn towards it only on the last stretch, not across intergalactic space.
+      const near = 1 - THREE.MathUtils.smoothstep(dist / end, 1.5, 6);
+      offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
+    }
+    if (ap.target.kind === 'blackhole') {
+      // Arrive above the disc, some 23 degrees over its plane: the classic view, its far side lensed over the shadow.
+      const [nx, ny, nz] = ap.target.bh.axis;
+      const normal = q1Vec.set(nx, ny, nz);
+      const up = Math.sign(offset.dot(normal)) || 1;
+      const side = sideVec.copy(offset).addScaledVector(normal, -offset.dot(normal));
+      if (side.lengthSq() < 1e-6) side.set(1, 0, 0).addScaledVector(normal, -normal.x);
+      side.normalize();
+      const pref = side.multiplyScalar(Math.cos(0.4)).addScaledVector(normal, Math.sin(0.4) * up).normalize();
+      const near = 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40);
+      offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
+    }
+    if (ap.target.kind === 'nebula') {
+      // Arrive on the side that faces Sol, as the photographs show it: the lit face of a blister such as Orion,
+      // not the inside of the dark cloud behind it.
+      const sg = ap.target.nebula.sight;
+      const pref = q1Vec.set(sg[6], sg[7], sg[8]);
+      const near = 1 - THREE.MathUtils.smoothstep(dist / end, 1.5, 6);
+      offset.lerp(pref, (1 - Math.exp(-dt * 1.4)) * near).normalize();
+    }
     if (ap.target.kind === 'body') {
       // Swing around to the sunlit side so arrivals show a lit, slightly gibbous disk.
       const starPos = targetPosition({ kind: 'star', star: ap.target.star }, this.anchor, simTime, q1Vec);
@@ -240,7 +289,14 @@ export class Player {
     const next = end + remaining * Math.exp(-rate * dt);
     this.local.copy(tp).addScaledVector(offset, next);
 
-    m1.lookAt(this.local, tp, v2.copy(UP).applyQuaternion(this.quat));
+    v2.copy(UP).applyQuaternion(this.quat);
+    // By a black hole, end up with its disc level across the view (its axis up on screen).
+    if (ap.target.kind === 'blackhole') {
+      const [nx, ny, nz] = ap.target.bh.axis;
+      const up = sideVec.set(nx, ny, nz).multiplyScalar(Math.sign(offset.dot(sideVec.set(nx, ny, nz))) || 1);
+      v2.lerp(up, 1 - THREE.MathUtils.smoothstep(dist / end, 3, 40)).normalize();
+    }
+    m1.lookAt(this.local, tp, v2);
     q1.setFromRotationMatrix(m1);
     this.quat.slerp(q1, 1 - Math.exp(-dt * 3.5));
 
@@ -253,7 +309,10 @@ export class Player {
     this.autopilot = null;
     this.velocity.set(0, 0, 0);
     this.collide(obstacles);
-    this.setSpeedFor(Number.isFinite(this.altitude) ? this.altitude : parkingDistance(ap.target));
+    // A galaxy is approached at a speed that takes a good while to cross it, so the first press of W
+    // does not shoot straight past it.
+    if (ap.target.kind === 'galaxy') this.speedSetting = THREE.MathUtils.clamp(parkingDistance(ap.target) / 30, MIN_SPEED, MAX_SPEED);
+    else this.setSpeedFor(Number.isFinite(this.altitude) ? this.altitude : parkingDistance(ap.target));
     this.onArrive(ap.target, ap.land);
   }
 

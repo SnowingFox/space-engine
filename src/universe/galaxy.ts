@@ -1,4 +1,5 @@
 import { Rng, hash32 } from '../core/rng';
+import { COMPANION_STARS } from './blackHoles';
 import { makeStar, makeSol, type StarData } from './stars';
 import { densityOf, galaxiesAround, toGalaxy } from './universe';
 
@@ -77,6 +78,10 @@ export function generateSector(level: number, ix: number, iy: number, iz: number
 
   if (level === 0 && ix === solSector.x && iy === solSector.y && iz === solSector.z) {
     stars.push(makeSol(SOL_POS.x, SOL_POS.y, SOL_POS.z));
+  }
+  // The real stars of the black-hole binaries (blackHoles.ts), in the level that suits their luminosity.
+  for (const s of COMPANION_STARS) {
+    if (s.level === level && sectorOfPosition(level, s.x) === ix && sectorOfPosition(level, s.y) === iy && sectorOfPosition(level, s.z) === iz) stars.push(s);
   }
 
   // Most of the universe is empty: only cells inside some galaxy hold stars.

@@ -6,7 +6,7 @@ import { sameTarget, targetName, targetPosition, targetRadius, type Target } fro
 export interface LabelItem {
   key: string;
   text: string;
-  cls: 'star' | 'planet' | 'moon';
+  cls: 'star' | 'planet' | 'moon' | 'galaxy' | 'blackhole' | 'nebula';
   /** Screen position of the object's centre, CSS px. */
   x: number;
   y: number;
@@ -19,6 +19,14 @@ export interface LabelItem {
   opacity: number;
   /** Estimated text width, px, for hit-testing and decluttering. */
   width: number;
+}
+
+/** Something besides the current system to name, e.g. a black hole nearby (camera-relative position, km). */
+export interface LabelSource {
+  target: Target;
+  rel: THREE.Vector3;
+  radius: number;
+  fade: number;
 }
 
 export interface Marker {
@@ -54,6 +62,7 @@ const MAX_LABELS = 8;
 export function buildLabels(
   view: SystemView | null, player: Player, selected: Target | null, simTime: number,
   camera: THREE.PerspectiveCamera, width: number, height: number, showLabels = true, avoid: readonly Box[] = [],
+  extra: readonly LabelSource[] = [],
 ): LabelLayout {
   const items: LabelItem[] = [];
   let marker: Marker | null = null;
@@ -127,9 +136,14 @@ export function buildLabels(
     }
   }
 
+  for (const e of extra) {
+    selectedShown ||= sameTarget(e.target, selected);
+    add(`x${targetName(e.target)}`, e.target, e.target.kind === 'blackhole' || e.target.kind === 'nebula' ? e.target.kind : 'star', e.rel, e.radius, e.fade);
+  }
+
   if (selected && !selectedShown) {
     rel.copy(targetPosition(selected, player.anchor, simTime, rel)).sub(player.local);
-    add('selected', selected, selected.kind === 'star' ? 'star' : 'planet', rel, targetRadius(selected), 1);
+    add('selected', selected, selected.kind === 'body' ? 'planet' : selected.kind, rel, targetRadius(selected), 1);
   }
 
   // Declutter: the selection first, then the star, then the nearest bodies. A label is
@@ -150,7 +164,7 @@ export function buildLabels(
 }
 
 function rank(it: LabelItem): number {
-  return it.selected ? 0 : it.cls === 'star' ? 1 : 2;
+  return it.selected ? 0 : it.cls === 'star' || it.cls === 'blackhole' ? 1 : 2;
 }
 
 /** The label under a screen point, if any: labels are clickable like the objects themselves. */

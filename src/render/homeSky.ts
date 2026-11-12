@@ -27,7 +27,9 @@ uniform float uLod;
 varying vec3 vDir;
 void main() {
   vec3 d = uFrame * normalize(vDir);
-  float l = (atan(-d.z, -d.x) - uTurn) * uMirror;
+  // l from the direction to the galaxy's centre (-cos, -sin of uTurn) towards l = 90 deg (the pole crossed with it).
+  vec2 cs = vec2(cos(uTurn), sin(uTurn));
+  float l = atan(d.z * cs.x - d.x * cs.y, -(d.x * cs.x + d.z * cs.y)) * uMirror;
   float b = asin(clamp(d.y, -1.0, 1.0));
   b = clamp(b + uShift * cos(b), -1.5707, 1.5707);
   vec2 uv = vec2(0.5 - l / 6.2831853, 0.5 + b / 3.14159265);

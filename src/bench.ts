@@ -12,6 +12,8 @@ import { shadowStats } from './render/terrainShadow';
 import { makeSolSystem } from './universe/sol';
 import { makeSol, makeStar } from './universe/stars';
 import { generateSystem } from './universe/system';
+import { simTimeAt } from './universe/bodies';
+import { SCENIC_EPOCH_MS } from './game/scenic';
 
 const q = new URLSearchParams(location.search);
 const num = (k: string, d: number) => (q.has(k) ? Number(q.get(k)) : d);
@@ -25,7 +27,8 @@ pipeline.scene.add(view.group);
 
 const planet = system.planets[num('body', 2)];
 const body = q.has('moon') ? planet.moons[num('moon', 0)] : planet;
-const simTime = num('t', 0);
+// t counts from the scenic epoch, so a pose found here pastes into src/game/scenic.ts.
+const simTime = simTimeAt(SCENIC_EPOCH_MS) + num('t', 0);
 view.advance(simTime);
 const state = view.bodies.find((b) => b.body === body)!;
 

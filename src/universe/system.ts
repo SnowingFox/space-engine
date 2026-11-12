@@ -1,6 +1,7 @@
 import { Rng, hash32 } from '../core/rng';
 import { EARTH_RADIUS_KM, KM_PER_AU, SECONDS_PER_DAY } from '../core/units';
-import { GM_EARTH, GM_SUN, keplerPeriod, type Atmosphere, type BodyData, type PlanetType, type SystemData } from './bodies';
+import { EPOCH_TT, GM_EARTH, GM_SUN, basisQuaternion, bodyOrientation, keplerPeriod, type Atmosphere, type BodyData, type PlanetType, type SystemData } from './bodies';
+import { orbitNormal, periapsisDir, type Orbit } from './ephemeris';
 import { hsl, makePalette } from './palette';
 import { makeSolSystem } from './sol';
 import type { StarData } from './stars';
@@ -24,7 +25,7 @@ function buildSystem(star: StarData): SystemData {
 
   const rng = new Rng(hash32(star.id, 0xbeef));
   const maxPlanets = star.kind === 'dwarf' ? 3 : star.kind === 'main' ? 9 : 5;
-  const count = rng.int(star.kind === 'main' ? 2 : 0, maxPlanets);
+  const count = star.noPlanets ? 0 : rng.int(star.kind === 'main' ? 2 : 0, maxPlanets);
   const lumRoot = Math.sqrt(star.lum);
   const frostLine = 2.7 * lumRoot;
   // Keep the first orbit clear of the stellar surface.
@@ -39,9 +40,19 @@ function buildSystem(star: StarData): SystemData {
     p.orbitRadius = au * KM_PER_AU;
     p.orbitPeriod = keplerPeriod(p.orbitRadius, GM_SUN * star.mass);
     p.inclination = rng.range(-0.06, 0.06);
+    spinFromEpoch(p);
     addMoons(rng, p, star.id, i);
     planets.push(p);
     au *= rng.range(1.45, 2.1);
+  }
+  // Eccentricities small enough that neighbouring orbits never cross; close-in ones are tidally circularised.
+  for (const [i, p] of planets.entries()) {
+    const ratio = Math.min(
+      i > 0 ? p.orbitRadius / planets[i - 1].orbitRadius : Infinity,
+      i < planets.length - 1 ? planets[i + 1].orbitRadius / p.orbitRadius : Infinity,
+    );
+    const spaced = Number.isFinite(ratio) ? (0.8 * (ratio - 1)) / (ratio + 1) : 0.3;
+    setOrbit(p, GALACTIC_PLANE, p.orbitRadius < 0.1 * KM_PER_AU ? 0.04 : Math.min(0.3, spaced));
   }
   return { star, planets };
 }
@@ -119,9 +130,65 @@ function addMoons(rng: Rng, p: BodyData, starId: number, index: number): void {
     moon.orbitRadius = orbit;
     moon.orbitPeriod = keplerPeriod(orbit, GM_EARTH * p.mass);
     moon.inclination = rng.range(-0.12, 0.12);
-    moon.rotationPeriod = moon.orbitPeriod; // tidally locked
     moon.parent = p;
+    setOrbit(moon, equatorFrame(p), 0.05);
+    lockTo(moon);
     p.moons.push(moon);
     orbit *= rng.range(1.5, 2.2);
   }
+}
+
+// Orbits. Their extra numbers come from a generator of their own, so that the draws above (and
+// with them every name, type and look) stay what they were.
+
+/** Planets orbit in the galactic plane (XZ), anticlockwise seen from +Y, as they turn. */
+const GALACTIC_PLANE = [1, 0, 0, 0, 0, 1, 0, -1, 0];
+
+/** A planet's equator as a reference plane: x its prime meridian at spin 0, z its pole. */
+function equatorFrame(p: BodyData): number[] {
+  const [qx, qy, qz, qw] = bodyOrientation(p);
+  const rot = (x: number, y: number, z: number) => {
+    // v + 2w(q x v) + 2 q x (q x v)
+    const tx = 2 * (qy * z - qz * y), ty = 2 * (qz * x - qx * z), tz = 2 * (qx * y - qy * x);
+    return [x + qw * tx + (qy * tz - qz * ty), y + qw * ty + (qz * tx - qx * tz), z + qw * tz + (qx * ty - qy * tx)];
+  };
+  const X = rot(1, 0, 0), Y = rot(0, 1, 0), Z = rot(0, 0, 1);
+  // Columns: x, -z (east, so that the moons go round the way the planet turns), y.
+  return [X[0], -Z[0], Y[0], X[1], -Z[1], Y[1], X[2], -Z[2], Y[2]];
+}
+
+/**
+ * Kepler elements from the circle drawn before: the same size, phase (now the mean anomaly at
+ * J2000) and plane, and an eccentricity that is mostly small (close-in planets are circularised).
+ */
+function setOrbit(b: BodyData, frame: number[], eMax: number): void {
+  const r = new Rng(hash32(b.id, 0x0eb1));
+  const u = r.next();
+  const e = eMax * u * u * u;
+  const peri = r.range(0, Math.PI * 2);
+  const n = (2 * Math.PI) / b.orbitPeriod;
+  const o: Orbit = {
+    a: b.orbitRadius, e, i: Math.abs(b.inclination), node: b.node + (b.inclination < 0 ? Math.PI : 0), peri,
+    eDot: 0, iDot: 0, nodeDot: 0, periDot: 0,
+    m0: b.orbitPhase, n, frame,
+  };
+  b.orbit = o;
+  const m = o.m0 + n * EPOCH_TT;
+  b.orbitPhase = m - 2 * Math.PI * Math.floor(m / (2 * Math.PI));
+}
+
+/** Turn from J2000 like the orbit, so that a moment looks the same on every visit. */
+function spinFromEpoch(b: BodyData): void {
+  const turns = EPOCH_TT / b.rotationPeriod;
+  b.spinPhase = (turns - Math.floor(turns)) * Math.PI * 2;
+}
+
+/** Tidally locked: the pole along the orbit's, the prime meridian facing the planet on average. */
+function lockTo(moon: BodyData): void {
+  const o = moon.orbit!;
+  const pole = orbitNormal(o, { x: 0, y: 0, z: 0 });
+  moon.orientation = basisQuaternion(periapsisDir(o, { x: 0, y: 0, z: 0 }), pole);
+  moon.rotationPeriod = moon.orbitPeriod;
+  moon.spinPhase = moon.orbitPhase + Math.PI;
+  moon.axialTilt = 0;
 }
