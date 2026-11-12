@@ -379,15 +379,15 @@ export class Hud {
     setText(this.modeEl, f.mode);
     this.modeEl.classList.toggle('auto', f.auto);
     setText(this.velEl, formatSpeed(f.speed));
-    // Near a body the setting is capped: show what thrust will actually do here, and the setting on hover.
+    // The setting is exactly what the player set (only the wheel, +/- and an arrival change it). Near a
+    // body the flight is held below it for safety: that shows separately, as the 'limited' tag.
     const capped = f.cap < f.speedSetting;
-    const effective = formatSpeed(capped ? f.cap : f.speedSetting);
-    setText(this.setEl, effective);
-    this.setEl.title = capped ? `Setting ${formatSpeed(f.speedSetting)}, limited near bodies` : '';
+    setText(this.setEl, formatSpeed(f.speedSetting));
+    setText(this.limitEl, capped ? `limited to ${formatSpeed(f.cap)}` : 'limited');
     // A change of the speed setting shows top-centre for a moment, then fades.
     if (f.speedSetting !== this.lastSetting) {
       if (this.lastSetting > 0) {
-        this.speedNoteEl.textContent = capped ? `${effective}  (setting ${formatSpeed(f.speedSetting)}, limited here)` : effective;
+        this.speedNoteEl.textContent = formatSpeed(f.speedSetting);
         this.speedNoteEl.classList.add('show');
         clearTimeout(this.speedNoteTimer);
         this.speedNoteTimer = window.setTimeout(() => this.speedNoteEl.classList.remove('show'), 1400);

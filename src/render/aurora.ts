@@ -105,7 +105,9 @@ vec3 glow(vec3 p) {
   float arcs = (curtain(a, 0.0006, 1.0) + 0.6 * curtain(b, 0.0005, 0.85) + 0.25 * uActivity * curtain(c3, 0.0007, 0.7))
     * (1.0 - smoothstep(0.18, 0.28, abs(off)));
   // The diffuse glow around the curtains, centred on them (on either side alike, so it has no edge of its own).
-  float veil = 0.02 * exp(-a * a * 600.0) + 0.012 * exp(-b * b * 600.0);
+  // A fainter, broad glow reaches poleward over the cap: from the ground, looking under the lower border of a
+  // curtain, the eye sees the cap beyond, and with nothing there it showed as a black hump with a hard rim.
+  float veil = 0.02 * exp(-a * a * 600.0) + 0.012 * exp(-b * b * 600.0) + 0.006 * exp(-a * a * (a < 0.0 ? 40.0 : 600.0));
   // Most samples lie in the glow between the curtains, where the patterns along them do not show: there
   // they take their mean values, and the noise below is only looked up near a curtain.
   bool near = arcs > 2e-3 * veil;

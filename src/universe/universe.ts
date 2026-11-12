@@ -53,6 +53,20 @@ export interface GalaxyData {
   elongation?: number;
   /** Luminosity, in the Milky Way's (generated galaxies, cosmos.ts). */
   lum?: number;
+  /**
+   * A ring: radius (fraction of the radius), brightness of its young stars relative to the disc there (above 1, the
+   * disc inside it and beyond it is cleared, as in a collisional or Hoag-type ring), spokes (count; negative: the
+   * ring is polar, round the disc's axis), and a ring of dust at the same radius (the Sombrero's).
+   */
+  ring?: [number, number, number, number];
+  /** Tidal tails (an interacting galaxy's, out to its radius), shells (an elliptical's), a starburst's outflow. */
+  tails?: number;
+  shells?: number;
+  outflow?: number;
+  /** How far its disc is warped: the plane's height at the edge, in radii, up on one side and down on the other. */
+  warp?: number;
+  /** What it is, in words, where its kind says too little (a ring galaxy, a polar ring, a dwarf spheroidal...). */
+  type?: string;
 }
 
 /** Fractional part of a hash of a galaxy's seed: a value of its own that draws nothing from the generator. */
@@ -170,6 +184,32 @@ function facing(l: number, b: number, tilt: number, spin: number): number[] {
   return axesFromNormal(-ux * c + px * s, -uy * c, -uz * c + pz * s, spin);
 }
 
+/** Equatorial (J2000, degrees) to galactic longitude and latitude (degrees). */
+function galacticOf(ra: number, dec: number): [number, number] {
+  const a = ra * DEG, d = dec * DEG;
+  const x = Math.cos(d) * Math.cos(a), y = Math.cos(d) * Math.sin(a), z = Math.sin(d);
+  // (The IAU rotation from equatorial to galactic axes.)
+  const gx = -0.0548755604 * x - 0.8734370902 * y - 0.4838350155 * z;
+  const gy = 0.4941094279 * x - 0.44482963 * y + 0.7469822445 * z;
+  const gz = -0.867666149 * x - 0.1980763734 * y + 0.4559837762 * z;
+  return [(Math.atan2(gy, gx) / DEG + 360) % 360, Math.asin(gz) / DEG];
+}
+
+/** Right ascension and declination (J2000, degrees) and distance from Sol (ly) to universe coordinates. */
+function fromRaDec(ra: number, dec: number, dist: number): [number, number, number] {
+  return fromSky(...galacticOf(ra, dec), dist);
+}
+
+/** A point `d` ly from `c`, across the line of sight from Sol, at an angle `angle` round it. */
+function offsetFrom(c: [number, number, number], d: number, angle: number): [number, number, number] {
+  const u = [c[0] - SOL.x, c[1] - SOL.y, c[2] - SOL.z];
+  const l = Math.hypot(u[0], u[1], u[2]);
+  const f = u.map((v) => v / l);
+  const e1 = [-f[2], 0, f[0]].map((v, _, a) => v / Math.hypot(a[0], a[1], a[2]));
+  const e2 = [f[1] * e1[2] - f[2] * e1[1], f[2] * e1[0] - f[0] * e1[2], f[0] * e1[1] - f[1] * e1[0]];
+  return [0, 1, 2].map((i) => c[i] + d * (Math.cos(angle) * e1[i] + Math.sin(angle) * e2[i])) as [number, number, number];
+}
+
 function build(): GalaxyData[] {
   const list: GalaxyData[] = [];
   const rng = new Rng(20260411);
@@ -198,7 +238,8 @@ function build(): GalaxyData[] {
     // A barred Magellanic spiral, as the wide-field photographs show it: a bright bar of star clouds off the
     // disc's centre, one arm wound out from its end (to the north-east, 30 Doradus on it), a faint patchy disc.
     // (Two arms, one of them all but gone: a single arm of the width real ones have.)
-    arms: 2, pitchK: 1.0, armContrast: 2.2, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.22 / 750, discLum: 0.6e-4,
+    // (Wound tightly enough to sweep half round the disc, from 3 to 12 kly out.)
+    arms: 2, pitchK: 2.2, armContrast: 1.6, bar: 3.5, bulgeScale: 1400, bulgeFlat: 2.5, bulgeLum: 0.22 / 750, discLum: 0.6e-4,
     discScale: 4500, height: 650, irregular: 0.62, blue: 0.95, dust: 0.5, barShift: [-800, 1200], tint: [0.84, 0.82, 1.0],
     flocculent: 0.25, spurs: 0, lopsided: 1,
     knots: [[3200, 2400, 1800, 3.2], [-5200, -2600, 900, 1.5], [1200, -3600, 700, 1.2]],
@@ -207,13 +248,13 @@ function build(): GalaxyData[] {
   // the disc and bar of then: only its share between them has changed.)
   {
     const lmc = list[list.length - 1];
-    // (And 0.88: with more of it in the bar, less is lost in its dust, and from Sol it came out 15 % brighter.)
-    const k = 0.88 * lightOf({ ...lmc, discLum: 0.6e-4, bulgeLum: 0.16 / 750 }) / lightOf(lmc);
+    // (And 0.7: with more of it in the bar and the arm, less is lost in its dust; so it is as bright from Sol as before.)
+    const k = 0.7 * lightOf({ ...lmc, discLum: 0.6e-4, bulgeLum: 0.16 / 750 }) / lightOf(lmc);
     lmc.discLum *= k;
     lmc.bulgeLum *= k;
-    // 30 Doradus where the arm leaves the bar: the brightest point of the arm at its distance from the centre.
+    // 30 Doradus on the arm some 5 kly out, beyond the bar's end: the arm's brightest point at that distance.
     // (With the march's wobble of the arms' angle, gDiscPolar.)
-    const d30 = lmc.knots![0], r30 = Math.hypot(d30[0], d30[1]);
+    const d30 = lmc.knots![0], r30 = 5000;
     let best = -1, bestTh = 0;
     for (let i = 0; i < 360; i++) {
       const th = (i / 360) * Math.PI * 2;
@@ -240,19 +281,60 @@ function build(): GalaxyData[] {
   add('M110', 'elliptical', fromSky(120.7, -21.1, 2.69e6), 8500);
   add('Sculptor (NGC 253)', 'spiral', fromSky(97.4, -88, 11.4e6), 45000);
   add("Bode's Galaxy (M81)", 'spiral', fromSky(142.1, 40.9, 11.8e6), 48000, undefined, { arms: 2, armContrast: 1 });
-  add('Cigar Galaxy (M82)', 'irregular', fromSky(141.4, 40.6, 11.5e6), 18500);
-  add('Centaurus A', 'lenticular', fromSky(309.5, 19.4, 12.4e6), 48000, undefined, { dust: 2.2 });
+  // A starburst: red filaments of hot gas blown out along its axis.
+  add('Cigar Galaxy (M82)', 'irregular', fromSky(141.4, 40.6, 11.5e6), 18500, undefined, { outflow: 1.2, type: 'Starburst galaxy' });
+  // A giant elliptical with a warped disc of dust across it (from a spiral it swallowed).
+  // (Its disc seen some 15 deg from edge-on, the lane across the middle as in the photographs.)
+  randomAxes(rng);
+  add('Centaurus A', 'lenticular', fromSky(309.5, 19.4, 12.4e6), 48000, facing(309.5, 19.4, 75, 2.0), {
+    dust: 5, bulgeLum: 1.8 / 4800, bulgeScale: 4800, bulgeFlat: 1.1, discLum: 0.35e-4, discScale: 6000, ring: [0.22, 0, 0, 2.5], warp: 1.2, blue: 0.7, type: 'Elliptical galaxy with a dust lane',
+  });
   add('Southern Pinwheel (M83)', 'barred spiral', fromSky(314.6, 32, 15e6), 27500, undefined, { arms: 2, armContrast: 1, blue: 1 });
   add('Pinwheel (M101)', 'spiral', fromSky(102, 59.8, 21e6), 85000, undefined, {
     // (Its bulge small and faint, its disc flocculent nearly to the centre.)
-    arms: 4, armContrast: 0.9, blue: 1, flocculent: 0.7, spurs: 0.6, lopsided: 0.7, pitchK: 1 / Math.tan(28 * DEG), bulgeScale: 2000, bulgeLum: 0.5e-4,
+    arms: 4, armContrast: 0.9, blue: 1, flocculent: 0.7, spurs: 0.6, lopsided: 0.7, pitchK: 1 / Math.tan(28 * DEG), bulgeScale: 1800, bulgeLum: 0.25e-4,
   });
   add('Whirlpool (M51)', 'spiral', fromSky(104.9, 68.6, 28e6), 38000, undefined, { arms: 2, armContrast: 1, blue: 0.9, flocculent: 0.2, spurs: 0.8, lopsided: 0.35 });
-  add('Sombrero (M104)', 'lenticular', fromSky(298.5, 51.1, 31e6), 25000, undefined, { dust: 1.8 });
+  // The Sombrero: a great bright bulge and halo, a thin disc seen 6 deg from edge-on, and a crisp dark ring of
+  // dust round it. (Random axes are still drawn, so that every galaxy after it stays as it was.)
+  randomAxes(rng);
+  add('Sombrero (M104)', 'lenticular', fromSky(298.5, 51.1, 31e6), 25000, facing(298.5, 51.1, 84, 0.3), {
+    dust: 0, bulgeScale: 3200, bulgeFlat: 1.3, bulgeLum: 1.6 / 3200, discLum: 2.6e-4, discScale: 7000, height: 260,
+    ring: [0.62, 0.15, 0, 3.2], type: 'Spiral galaxy (Sa), edge-on',
+  });
   add('Phantom (M74)', 'spiral', fromSky(138.6, -45.7, 30e6), 47500, undefined, { arms: 2, armContrast: 1 });
   add('Virgo A (M87)', 'elliptical', fromSky(283.8, 74.5, 53.5e6), 66000);
   add('NGC 1300', 'barred spiral', fromSky(213.7, -55.5, 61e6), 55000, undefined, { arms: 2, armContrast: 1 });
 
+  // Peculiar galaxies, at their real positions (J2000) and distances.
+  // The Cartwheel: a smaller galaxy plunged through its disc 200-300 million years ago; the wave of star formation
+  // it set off is the bright blue ring, with spokes back to the small yellow core, and the intruder is near.
+  add('Cartwheel Galaxy', 'spiral', fromRaDec(9.421, -33.716, 500e6), 75000, facing(...galacticOf(9.421, -33.716), 30, 1.2), {
+    arms: 2, armContrast: 0, bulgeScale: 2600, bulgeLum: 0.5 / 2600, discLum: 2.2e-4, discScale: 26000, dust: 0.4, blue: 1,
+    ring: [0.82, 3, 10, 0.4], flocculent: 0, spurs: 0, lopsided: 0.3, type: 'Ring galaxy (collisional)',
+  });
+  add('Cartwheel companion (G2)', 'elliptical', offsetFrom(fromRaDec(9.421, -33.716, 500e6), 160000, 0.7), 11000);
+  // Hoag's Object: a near-perfect ring of young blue stars round a round yellow core, a dark gap between.
+  add("Hoag's Object", 'lenticular', fromRaDec(229.31, 21.586, 612.8e6), 50000, facing(...galacticOf(229.31, 21.586), 8, 0), {
+    bulgeScale: 2300, bulgeFlat: 1.05, bulgeLum: 1.4 / 2300, discLum: 2.0e-4, discScale: 22000, dust: 0, blue: 1,
+    ring: [0.72, 2.4, 0, 0], type: 'Ring galaxy (Hoag-type)',
+  });
+  // The Antennae: two spirals in collision, their long tidal tails like an insect's antennae.
+  {
+    const c = fromRaDec(180.47, -18.869, 45e6);
+    const tails = { arms: 2, armContrast: 0.6, discScale: 7000, height: 700, blue: 1, irregular: 0.7, flocculent: 0.8, tails: 1.6, type: 'Interacting galaxy' };
+    const [l, b] = galacticOf(180.47, -18.869);
+    add('Antennae (NGC 4038)', 'spiral', offsetFrom(c, 14000, 0), 110000, facing(l, b, 35, 0.4), tails);
+    add('Antennae (NGC 4039)', 'spiral', offsetFrom(c, 14000, Math.PI), 95000, facing(l, b, 50, 2.6), tails);
+  }
+  // The Mice: a pair caught in their first passage, each with one long straight tail.
+  {
+    const c = fromRaDec(191.54, 30.732, 290e6);
+    const tails = { arms: 2, armContrast: 0.7, discScale: 9000, height: 900, blue: 0.8, irregular: 0.4, tails: 1.3, lopsided: 1, type: 'Interacting galaxy' };
+    const [l, b] = galacticOf(191.54, 30.732);
+    add('Mice (NGC 4676A)', 'spiral', offsetFrom(c, 50000, 0.4), 120000, facing(l, b, 70, 1.0), tails);
+    add('Mice (NGC 4676B)', 'spiral', offsetFrom(c, 50000, 0.4 + Math.PI), 100000, facing(l, b, 45, 2.2), tails);
+  }
   // (The rest of the universe is generated where the camera goes: cosmos.ts.)
   catalogued = list.length;
   return list;
