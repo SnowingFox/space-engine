@@ -20,6 +20,40 @@ uniform float uLimit;    // faintest magnitude that shows: fainter under a brigh
 uniform float uTime;
 uniform vec3 uTrail;     // how far the camera moved during one exposure, ly (universe axes)
 uniform float uPpr;      // device pixels per radian
+uniform vec3 uZenith;    // straight up from where the camera stands on a world with air (universe axes)
+uniform float uAir;      // how much air is overhead, 0 in space, 1 at the bottom of an Earth-like atmosphere
+
+// Air between the star and the eye, in units of the air straight overhead (Kasten & Young 1989 form):
+// 1 at the zenith, about 38 at the horizon.
+float airmass(vec3 pos) {
+  if (uAir <= 0.0) return 1.0;
+  vec3 dir = normalize((modelMatrix * vec4(pos, 1.0)).xyz);
+  float c = max(dot(dir, uZenith), 0.0);
+  return min(1.0 / (c + 0.025 * exp(-11.0 * c)), 38.0);
+}
+// Hash for flicker that is random from frame to frame, as scintillation is (it runs at tens of Hz).
+float twinkleNoise(float id, float t) {
+  float i = floor(t), f = fract(t);
+  float a = fract(sin(id * 12.9898 + i * 78.233) * 43758.5453);
+  float b = fract(sin(id * 12.9898 + (i + 1.0) * 78.233) * 43758.5453);
+  return mix(a, b, f * f * (3.0 - 2.0 * f)) * 2.0 - 1.0;
+}
+// What the air does to a star's light: extinction that reddens it toward the horizon, and
+// scintillation, stronger and more coloured the lower the star (each colour is refracted along a
+// slightly different path through the turbulence, so near the horizon a bright star flashes colours).
+vec3 throughAir(vec3 pos, float id) {
+  if (uAir <= 0.0) return vec3(1.0);
+  float x = airmass(pos);
+  // Relative to the zenith (the limiting magnitude already accounts for the air overhead):
+  // about 0.2 magnitudes per airmass in the visible, more in the blue.
+  vec3 ext = exp(-uAir * (x - 1.0) * vec3(0.13, 0.19, 0.33));
+  float s = uTwinkle * min(0.12 * pow(x, 0.75), 0.75);
+  float t = uTime * 24.0;
+  float common_ = twinkleNoise(id, t);
+  vec3 colour = vec3(twinkleNoise(id + 0.37, t * 1.13), twinkleNoise(id + 0.71, t * 0.91), twinkleNoise(id + 0.13, t * 1.27));
+  float chroma = smoothstep(2.0, 10.0, x);
+  return ext * max(vec3(0.0), 1.0 + s * mix(vec3(common_), colour, 0.6 * chroma));
+}
 // Length on screen, in device pixels, of the streak a star at 'pos' leaves during one exposure.
 float streakPx(vec3 pos) {
   vec3 a = (modelViewMatrix * vec4(pos, 1.0)).xyz;
@@ -45,15 +79,15 @@ void main() {
   float size = clamp(2.1 - mag * 0.26, 1.0, 3.0);
   // About what the eye sees on a dark night; fainter stars fade out instead of flickering.
   intensity *= smoothstep(uLimit, uLimit - 2.8, mag);
-  // Scintillation: turbulence in the air focuses and spreads each star's light, many times a second.
-  float ph = fract(aId * 0.6180339) * 6.2831853;
-  float flicker = sin(uTime * (17.0 + 9.0 * fract(aId * 0.31)) + ph) * sin(uTime * (6.1 + 3.0 * fract(aId * 0.77)) + 2.0 * ph);
-  // (A few tenths of a magnitude at most for the eye at a good site, and faster than it can follow.)
-  intensity *= 1.0 + uTwinkle * 0.18 * flicker;
+  // Seen through air: dimmer and redder toward the horizon, twinkling, and blurred a little by the
+  // turbulence (seeing), more so low down; the blur spreads the same light over a larger point.
+  vec3 air = throughAir(position, aId);
+  float seeing = 1.0 + uTwinkle * 0.12 * min(airmass(position), 8.0);
   // Moving fast, a star's light is spread along its streak (drawn by the lines below): the point keeps only its share.
-  float px = size * uPixelRatio;
-  intensity *= px / max(px, streakPx(position));
-  vColor = aColor * intensity;
+  float px = size * uPixelRatio * seeing;
+  // (The same light over a point seeing times wider: a seeing² lower peak.)
+  intensity *= px / max(px, streakPx(position)) / (seeing * seeing);
+  vColor = aColor * intensity * air;
   gl_PointSize = px;
   gl_Position = projectionMatrix * mv;
   if (abs(aId - uHideId) < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -121,6 +155,7 @@ export class Starfield {
       uniforms: {
         uHideId: { value: -1 }, uPixelRatio: { value: pixelRatio }, uTwinkle: { value: 0 }, uTime: { value: 0 },
         uTrail: { value: new THREE.Vector3() }, uPpr: { value: 1000 }, uLimit: { value: SPACE_LIMIT },
+        uZenith: { value: new THREE.Vector3(0, 1, 0) }, uAir: { value: 0 },
       },
       blending: THREE.AdditiveBlending,
       depthTest: false,
@@ -166,10 +201,12 @@ export class Starfield {
    * 0..1; skyGlow: the sky's own brightness behind the stars, 0..1. From the ground at night the eye
    * reaches about magnitude 6.5 (2 less than in space); airglow, twilight and moonlight take more.
    */
-  setTwinkle(twinkle: number, time: number, air = 0, skyGlow = 0): void {
+  setTwinkle(twinkle: number, time: number, air = 0, skyGlow = 0, zenith?: THREE.Vector3): void {
     const u = this.material.uniforms;
     u.uTwinkle.value = twinkle;
     u.uTime.value = time;
+    u.uAir.value = zenith ? air : 0;
+    if (zenith) (u.uZenith.value as THREE.Vector3).copy(zenith);
     u.uLimit.value = SPACE_LIMIT - 2.3 * air - 4.5 * Math.min(Math.max(skyGlow, 0), 1);
   }
 

@@ -45,6 +45,8 @@ pipeline.bgScene.add(cloud.group, nebulae.group, starfield.group);
 /** Where the camera was last frame (galactic, ly), for motion blur. */
 const lastGal = new THREE.Vector3(NaN, 0, 0);
 const travel = new THREE.Vector3();
+/** Straight up from the camera on the nearest world, for the air the starlight crosses. */
+const zenith = new THREE.Vector3();
 /** Smoothed camera velocity, ly/s. */
 const flight = new THREE.Vector3();
 /** Motion blur: the stars streak over the path they cross during one exposure, seconds. */
@@ -593,7 +595,8 @@ function frame(now: number): void {
   const air = low?.body.atmosphere;
   const depth = air ? 1 - THREE.MathUtils.smoothstep(player.altitude / low!.body.radius, 0, low!.view.atmoTop - 1) : 0;
   starfield.setTwinkle(air ? Math.min(air.density, 1.5) * depth * depth : 0, now / 1000,
-    air ? Math.min(air.density, 1.5) * depth : 0, air ? pipeline.daylight * depth : 0);
+    air ? Math.min(air.density, 1.5) * depth : 0, air ? pipeline.daylight * depth : 0,
+    air ? zenith.copy(player.local).sub(low!.pos).normalize() : undefined);
   // So they do next to a world in full daylight.
   dazzle = Math.max(dazzle, 0.8 * pipeline.daylight);
   pipeline.skyDim += (dazzle - pipeline.skyDim) * (1 - Math.exp(-dt / 0.4));
