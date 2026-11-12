@@ -75,6 +75,8 @@ uniform vec4 uB[${NEAR_GALAXIES}];
 uniform vec4 uC[${NEAR_GALAXIES}];
 uniform vec4 uD[${NEAR_GALAXIES}];
 uniform vec4 uE[${NEAR_GALAXIES}];
+uniform vec4 uF[${NEAR_GALAXIES}];
+uniform vec4 uG[${NEAR_GALAXIES}];
 uniform mat3 uFrame[${NEAR_GALAXIES}];   // universe axes to the galaxy's own
 uniform vec3 uEye[${NEAR_GALAXIES}];     // the camera in the galaxy's frame
 uniform float uWeight[${NEAR_GALAXIES}];
@@ -103,7 +105,7 @@ void main() {
   vec4 sum = vec4(0.0);
   for (int i = 0; i < ${NEAR_GALAXIES}; i++) {
     if (i >= uCount) break;
-    vec4 g = galaxyMarch(uEye[i], uFrame[i] * dir, uA[i], uB[i], uC[i], uD[i], uE[i], uSteps, jitter, uPixel) * uWeight[i];
+    vec4 g = galaxyMarch(uEye[i], uFrame[i] * dir, uA[i], uB[i], uC[i], uD[i], uE[i], uF[i], uG[i], uSteps, jitter, uPixel) * uWeight[i];
     sum += (1.0 - sum.a) * g;
   }
   oColor = sum;
@@ -305,7 +307,7 @@ export class GalaxyHost {
       vertexShader: MARCH_VERT,
       fragmentShader: MARCH_FRAG,
       uniforms: {
-        uA: { value: vec4s() }, uB: { value: vec4s() }, uC: { value: vec4s() }, uD: { value: vec4s() }, uE: { value: vec4s() },
+        uA: { value: vec4s() }, uB: { value: vec4s() }, uC: { value: vec4s() }, uD: { value: vec4s() }, uE: { value: vec4s() }, uF: { value: vec4s() }, uG: { value: vec4s() },
         uFrame: { value: Array.from({ length: NEAR_GALAXIES }, () => new THREE.Matrix3()) },
         uEye: { value: Array.from({ length: NEAR_GALAXIES }, () => new THREE.Vector3()) },
         uWeight: { value: new Array(NEAR_GALAXIES).fill(0) },
@@ -451,12 +453,14 @@ export class GalaxyHost {
     const mu = this.march.uniforms;
     mu.uCount.value = near.length;
     near.forEach((n, i) => {
-      const [a, b, c, d, e] = galaxyParams(n.galaxy, 1);
+      const [a, b, c, d, e, f, h] = galaxyParams(n.galaxy, 1);
       mu.uA.value[i].fromArray(a);
       mu.uB.value[i].fromArray(b);
       mu.uC.value[i].fromArray(c);
       mu.uD.value[i].fromArray(d);
       mu.uE.value[i].fromArray(e);
+      mu.uF.value[i].fromArray(f);
+      mu.uG.value[i].fromArray(h);
       const ax = n.galaxy.axes;
       mu.uFrame.value[i].set(ax[0], ax[1], ax[2], ax[3], ax[4], ax[5], ax[6], ax[7], ax[8]);
       mu.uEye.value[i].set(n.eye.x, n.eye.y, n.eye.z);

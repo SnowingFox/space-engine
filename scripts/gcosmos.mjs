@@ -25,12 +25,12 @@ const out = await page.evaluate(`new Promise((done) => {
   const f = (n) => {
     times.push(n - prev); prev = n;
     if (times.length % 30 === 0) counts.push([Math.round((n - t0) / 100) / 10, se.cloud.state.galaxies]);
-    if (n - t0 < 8000) requestAnimationFrame(f);
+    if (n - t0 < Number(${JSON.stringify(process.env.MS ?? '8000')})) requestAnimationFrame(f);
     else {
       const s = times.slice(5).sort((a, b) => a - b);
       const kinds = {}; let lit = 0;
       se.cloud && window.__cosmos;
-      done({ counts, max: s[s.length - 1], over25: s.filter((t) => t > 25).length, p95: s[Math.floor(s.length * 0.95)], long });
+      done({ counts, max: s[s.length - 1], over25: s.filter((t) => t > 25).length, p95: s[Math.floor(s.length * 0.95)], long, heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) : null });
     }
   };
   requestAnimationFrame(f);

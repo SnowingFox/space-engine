@@ -39,7 +39,7 @@ const GALAXY_KIND: Record<GalaxyKind, string> = {
 };
 
 export function describe(t: Target): string {
-  if (t.kind === 'galaxy') return GALAXY_KIND[t.galaxy.kind];
+  if (t.kind === 'galaxy') return t.galaxy.type ?? GALAXY_KIND[t.galaxy.kind];
   if (t.kind === 'blackhole') return blackHoleKind(t.bh);
   if (t.kind === 'nebula') return t.nebula.type;
   if (t.kind === 'star') {
@@ -57,7 +57,7 @@ export function describe(t: Target): string {
 
 /** Shorter label for lists: "Planet", "Moon", "Star". */
 export function kindLabel(t: Target): string {
-  if (t.kind === 'galaxy') return GALAXY_KIND[t.galaxy.kind];
+  if (t.kind === 'galaxy') return t.galaxy.type ?? GALAXY_KIND[t.galaxy.kind];
   if (t.kind === 'blackhole') return blackHoleKind(t.bh);
   if (t.kind === 'nebula') return NEBULA_KIND[t.nebula.kind];
   if (t.kind === 'star') return `${t.star.cls} star`;
@@ -127,7 +127,7 @@ export function properties(t: Target): [string, string][] {
     const fromHome = Math.hypot(g.x - MILKY_WAY.x, g.y - MILKY_WAY.y, g.z - MILKY_WAY.z) * KM_PER_LY;
     const rows: [string, string][] = [
       ['Diameter', formatDistance(2 * g.radius * KM_PER_LY)],
-      ['Type', GALAXY_KIND[g.kind]],
+      ['Type', g.type ?? GALAXY_KIND[g.kind]],
     ];
     if (g.kind === 'spiral' || g.kind === 'barred spiral') rows.push(['Spiral arms', `${g.arms}`]);
     if (g.id !== MILKY_WAY.id) rows.push(['From the Milky Way', formatDistance(fromHome)]);

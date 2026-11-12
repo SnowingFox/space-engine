@@ -66,11 +66,14 @@ function luminosityAt(count: number, bright: number): number {
 /**
  * How faint (L*) the galaxies generated at a distance d go, as FAINT * (d / D_STAR)^2: deep enough that, with
  * the intergalactic dark adaptation (galaxyCloud.ts), each comes into being fainter than shows and fades in
- * (galaxyCloud's billboards fade them in over a factor of 3 above it).
+ * (galaxyCloud's billboards fade them in over a factor of 1.6 above it).
  */
+// (0.2: some 57,000 galaxies loaded around a typical camera, ~750 in view from 30 Mly out. 0.12 loads 85,000 and
+// makes frames late while flying between them, scripts/gspikes.mjs; the fade-in over a factor 1.6 instead
+// shows as many.)
 export const FAINT = 0.2;
 /** The most galaxies generated at once: past it the far cells are drawn shallower (Cosmos.bias). */
-const MAX_LOADED = 110000;
+const MAX_LOADED = 140000;
 
 /** The faintest galaxy (L*) worth drawing at a distance, with `bias` levels of four shallower: fainter ones would not show. */
 export function faintestAt(d: number, bias = 0): number {
@@ -276,7 +279,70 @@ function makeGalaxy(code: number, st: Structure, rank: number, x: number): Galax
   g.lum = x;
   // (Seeds above the catalogue's: the giant star-forming regions and off-centre bars the march gives a seed are its alone.)
   g.seed += 100;
+  morphology(g, st, rng, x);
   return g;
+}
+
+/**
+ * The finer kind of a generated galaxy, by its environment and its own seed (each draw after all the others, so
+ * nothing else about it changes): ellipticals from round (E0) to flat (E7), some with shells; dwarf spheroidals;
+ * grand-design and flocculent spirals, barred ones with inner rings; lenticulars, some with dust lanes; and now
+ * and then a ring galaxy, a polar ring or a pair in collision (makeCompanion).
+ */
+function morphology(g: GalaxyData, st: Structure, rng: Rng, x: number): void {
+  const u = rng.next(), v = rng.next();
+  if (g.kind === 'elliptical') {
+    if (x < 0.01) {
+      // A dwarf spheroidal: faint and spread out, its light the same.
+      g.radius *= 2.2;
+      g.bulgeScale *= 2.2;
+      g.bulgeLum /= 2.2 ** 3;
+      g.type = 'Dwarf spheroidal galaxy';
+      return;
+    }
+    g.bulgeFlat = 1 + 2.3 * u ** 1.6;
+    const n = Math.min(7, Math.round(10 * (1 - 1 / g.bulgeFlat)));
+    g.type = `E${n} elliptical galaxy`;
+    if (st.env !== 'cluster' && v < 0.15) { g.shells = 0.5 + 0.5 * rng.next(); g.type = `E${n} shell galaxy`; }
+  } else if (g.kind === 'spiral') {
+    if (u < 0.25) { g.armContrast = 1; g.flocculent = 0.08; g.spurs = 0.7; g.type = 'Grand-design spiral galaxy'; }
+    else if (u < 0.55) { g.armContrast = 0.45; g.flocculent = 0.9; g.type = 'Flocculent spiral galaxy'; }
+    if (st.env !== 'filament' && v < 0.02) {
+      // Collisional ring: a smaller galaxy fell through it.
+      g.armContrast = 0; g.flocculent = 0; g.ring = [0.7 + 0.15 * rng.next(), 2.6, 6 + Math.floor(rng.next() * 8), 0.3];
+      g.type = 'Ring galaxy (collisional)';
+    }
+  } else if (g.kind === 'barred spiral') {
+    if (u < 0.4) { g.ring = [0.28 + 0.1 * v, 0.7, 0, 0.3]; g.type = 'Barred spiral galaxy with an inner ring'; }
+  } else if (g.kind === 'lenticular') {
+    if (u < 0.3) { g.dust = 0.8 + 0.8 * v; g.type = 'Lenticular galaxy with a dust lane'; }
+    else if (u < 0.33) { g.ring = [0.55 + 0.2 * v, 1.4, -1, 0.8]; g.type = 'Polar-ring galaxy'; }
+    else if (u < 0.34) { g.ring = [0.7, 2.4, 0, 0]; g.bulgeFlat = 1.05; g.blue = 1; g.type = 'Ring galaxy (Hoag-type)'; }
+  }
+}
+
+/** In groups and clusters, a few spirals have a partner in collision: both throw out tidal tails. */
+function makeCompanion(code: number, st: Structure, rank: number, g: GalaxyData): GalaxyData | null {
+  if ((g.kind !== 'spiral' && g.kind !== 'barred spiral') || st.env === 'filament' || g.ring || rank >= MAX_RANK / 2) return null;
+  const rng = new Rng(hash32(code, st.sid, rank, SEED + 11));
+  if (rng.next() > 0.04) return null;
+  const x = (g.lum ?? 0.1) * rng.range(0.3, 1);
+  const dir = randomAxes(rng).slice(0, 3);
+  const sep = g.radius * rng.range(0.9, 1.6);
+  const cr = g.radius * Math.sqrt(x / Math.max(g.lum ?? 0.1, 1e-6));
+  const c: GalaxyData = {
+    id: idOf(code, st.sid, rank + MAX_RANK / 2), name: '', kind: 'spiral', x: g.x + dir[0] * sep, y: g.y + dir[1] * sep, z: g.z + dir[2] * sep,
+    axes: randomAxes(rng), radius: cr, ...shape('spiral', cr, rng),
+  };
+  const k = (x * MW_LIGHT) / Math.max(lightOf(c), 1e-30);
+  c.discLum *= k;
+  c.bulgeLum *= k;
+  c.name = `PGC ${c.id}`;
+  c.lum = x;
+  c.seed += 100;
+  // (Their tails reach out to twice their discs: the radius the march gives them is doubled, the discs kept.)
+  for (const h of [g, c]) { h.tails = 1 + rng.next(); h.radius *= 2; h.flocculent = 0.7; h.type = 'Interacting galaxy'; }
+  return c;
 }
 
 /** A cell's galaxies down to `limit` (L*), brightest of each structure first. */
@@ -287,12 +353,17 @@ function galaxiesOf(i: number, j: number, k: number, limit: number): GalaxyData[
     // Ranks: a Poisson process in the expected count above a luminosity, from its own seed.
     const rng = new Rng(hash32(code, st.sid, SEED + 3));
     let n = 0;
-    for (let rank = 0; rank < MAX_RANK; rank++) {
+    // (Ranks up to half of MAX_RANK: the upper half numbers the companions, makeCompanion.)
+    for (let rank = 0; rank < MAX_RANK / 2; rank++) {
       n -= Math.log(Math.max(rng.next(), 1e-12));
       const x = luminosityAt(n, st.bright);
       if (x < limit) break;
       const g = makeGalaxy(code, st, rank, x);
-      if (g) out.push(g);
+      if (g) {
+        out.push(g);
+        const c = makeCompanion(code, st, rank, g);
+        if (c) out.push(c);
+      }
     }
   }
   return out;
@@ -371,7 +442,7 @@ export class Cosmos {
   bias = 0;
 
   /** Brings the cells around the camera to the detail their distance calls for, within a time budget (ms). */
-  update(cam: { x: number; y: number; z: number }, budgetMs = 1.5): void {
+  update(cam: { x: number; y: number; z: number }, budgetMs = 1.0): void {
     const t0 = performance.now();
     if (this.byId.size > MAX_LOADED && this.bias < 3) { this.bias++; this.sweep = 0; }
     else if (this.byId.size < MAX_LOADED * 0.4 && this.bias > 0) { this.bias--; this.sweep = 0; }
@@ -485,5 +556,5 @@ export const isGenerated = (g: GalaxyData): boolean => g.id >= NAMED_GALAXIES;
 
 /** Whether a galaxy is bright enough to show from a distance (ly): the faint ones drawn near the limit are not picked. */
 export function visibleAt(g: GalaxyData, d: number): boolean {
-  return g.id < NAMED_GALAXIES || lightOf(g) / MW_LIGHT >= 3 * faintestAt(d);
+  return g.id < NAMED_GALAXIES || lightOf(g) / MW_LIGHT >= 1.6 * faintestAt(d);
 }

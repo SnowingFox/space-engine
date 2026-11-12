@@ -24,7 +24,7 @@ const INTERGALACTIC_ADAPT = 128;
 /** Billboard slots: the catalogue and every generated galaxy loaded around the camera. */
 const CAPACITY = 131072;
 /** Billboard slots written per frame at most, so that a burst of generated galaxies never makes a frame late. */
-const WRITES_PER_FRAME = 1200;
+const WRITES_PER_FRAME = 600;
 // A galaxy this many pixels in radius (fading in over the range) is drawn on the soft layer, at reduced
 // resolution: it fills much of the view, and its clouds are soft enough not to show the difference.
 const BIG_PX = [650, 1000];
@@ -58,6 +58,8 @@ attribute vec4 iB;
 attribute vec4 iC;
 attribute vec4 iD;
 attribute vec4 iE;
+attribute vec4 iF;
+attribute vec4 iG;
 attribute vec4 iGlow;   // rgb: light of the whole galaxy as one soft spot; a: its slot
 attribute float iLum;   // luminosity (the Milky Way's) of a generated galaxy, for its fade at the edge of what is generated
 uniform vec3 uCam;
@@ -76,6 +78,8 @@ varying vec4 vB;
 varying vec4 vC;
 varying vec4 vD;
 varying vec4 vE;
+varying vec4 vF;
+varying vec4 vG;
 varying vec4 vSpot;   // rgb: colour, a: falloff across the quad
 varying vec3 vMode;   // weight, 0 marched .. 1 spot, march steps
 varying vec2 vQuad;
@@ -96,11 +100,13 @@ void main() {
   weight *= 1.0 - big;
 #endif
   // A generated galaxy comes into being where it is still too faint to show (cosmos.ts faintestAt): and fades in
-  // from there as the camera comes nearer, so that none appears all at once.
+  // from there, over a factor of 1.6 in brightness, as the camera comes nearer, so that none appears all at once.
   // (uFaint: FAINT, times four for each level the far cells are drawn shallower, beyond 30 Mly.)
-  weight *= smoothstep(1.0, 3.0, iLum / ((d > 3e7 ? uFaint : ${FAINT.toFixed(3)}) * pow(d / ${D_STAR.toExponential()}, 2.0)));
+  weight *= smoothstep(1.0, 1.6, iLum / ((d > 3e7 ? uFaint : ${FAINT.toFixed(3)}) * pow(d / ${D_STAR.toExponential()}, 2.0)));
   // The surveyed sky has the Magellanic Clouds in it already.
   if (iGlow.a == 1.0 || iGlow.a == 2.0) weight *= 1.0 - uHideClouds;
+  // (Most of those generated are still faded out: nothing more to work out for them.)
+  if (weight <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   // Too small to show any structure: a soft spot carrying the same light, never smaller than a pixel.
   float spot = smoothstep(12.0, 5.0, px);
   float sigma = max(0.3 * px, 1.1);
@@ -113,7 +119,7 @@ void main() {
   vec3 world = c + (right * position.x + up * position.y) * size;
   mat3 frame = transpose(mat3(iX, iY, iZ));
   vEye = frame * -c;
-  vA = iA; vB = iB; vC = iC; vE = iE;
+  vA = iA; vB = iB; vC = iC; vE = iE; vF = iF; vG = iG;
   vD = vec4(iD.xy, iD.z * uBrightness, iD.w);
   float dim = 0.3 * px / sigma;
   vSpot = vec4(iGlow.rgb * (uBrightness * dim * dim), halfPx * halfPx / (2.0 * sigma * sigma));
@@ -149,13 +155,15 @@ varying vec4 vB;
 varying vec4 vC;
 varying vec4 vD;
 varying vec4 vE;
+varying vec4 vF;
+varying vec4 vG;
 varying vec4 vSpot;
 varying vec3 vMode;
 varying vec2 vQuad;
 void main() {
   vec4 col = vec4(0.0);
   if (vMode.y < 1.0) {
-    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, vE, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
+    col = galaxyMarch(vEye, normalize(vRay), vA, vB, vC, vD, vE, vF, vG, int(vMode.z), marchJitter(gl_FragCoord.xy), 1.0 / uPixelsPerRadian) * (1.0 - vMode.y);
   }
   if (vMode.y > 0.0) col.rgb += vSpot.rgb * (exp(-dot(vQuad, vQuad) * vSpot.a) * vMode.y);
   gl_FragColor = col * vMode.x;
@@ -283,7 +291,7 @@ export class GalaxyCloud {
       a.iY.array.set(g.axes.slice(3, 6), slot * 3);
       a.iZ.array.set(g.axes.slice(6, 9), slot * 3);
       const p = galaxyParams(g, 1);
-      ['iA', 'iB', 'iC', 'iD', 'iE'].forEach((name, k) => a[name].array.set(p[k], slot * 4));
+      ['iA', 'iB', 'iC', 'iD', 'iE', 'iF', 'iG'].forEach((name, k) => a[name].array.set(p[k], slot * 4));
       a.iGlow.array.set([...glowOf(g), slot], slot * 4);
       a.iLum.array[slot] = g.lum ?? 1e9;
     }
@@ -337,7 +345,7 @@ export class GalaxyCloud {
     const geometry = this.geometry;
     geometry.setAttribute('position', quad.getAttribute('position'));
     geometry.setIndex(quad.getIndex());
-    for (const [name, width] of [['iPos', 3], ['iX', 3], ['iY', 3], ['iZ', 3], ['iA', 4], ['iB', 4], ['iC', 4], ['iD', 4], ['iE', 4], ['iGlow', 4], ['iLum', 1]] as const) {
+    for (const [name, width] of [['iPos', 3], ['iX', 3], ['iY', 3], ['iZ', 3], ['iA', 4], ['iB', 4], ['iC', 4], ['iD', 4], ['iE', 4], ['iF', 4], ['iG', 4], ['iGlow', 4], ['iLum', 1]] as const) {
       const attr = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY * width), width);
       attr.setUsage(THREE.DynamicDrawUsage);
       this.attrs[name] = attr;
