@@ -41,8 +41,8 @@ void main() {
   // Brightness compressed less than before: a handful of bright stars, the rest faint pinpoints,
   // as in long-exposure photographs (and Space Engine) rather than a field of equal sparks.
   float intensity = clamp(1.25 * pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0);
-  // Pinpoints: most stars are a pixel or two; only the brightest grow, and their glow comes from the bloom.
-  float size = clamp(2.1 - mag * 0.26, 1.0, 3.0);
+  // Pinpoints: most stars are a couple of pixels; only the brightest grow, and their glow comes from the bloom.
+  float size = clamp(2.6 - mag * 0.3, 1.4, 3.6);
   // About what the eye sees on a dark night; fainter stars fade out instead of flickering.
   intensity *= smoothstep(uLimit, uLimit - 2.8, mag);
   // Scintillation: turbulence in the air focuses and spreads each star's light, many times a second.
@@ -71,7 +71,7 @@ void main() {
   float d = max(length(mv.xyz), 1e-4);
   float mag = -2.5 * log(aLum / (d * d)) / 2.302585 - 2.74;
   float intensity = clamp(1.25 * pow(2.512, 0.7 * (3.6 - mag)), 0.0, 9.0) * smoothstep(uLimit, uLimit - 2.8, mag);
-  float size = clamp(2.1 - mag * 0.26, 1.0, 3.0) * uPixelRatio;
+  float size = clamp(2.6 - mag * 0.3, 1.4, 3.6) * uPixelRatio;
   float len = streakPx(position);
   // The same light as the point would carry, spread over the streak's length (a line is a pixel wide).
   float spread = size * size / max(len, 1.0);
